@@ -26,6 +26,23 @@ export const resolveContentWithReasoningFallback = ({
   return content;
 };
 
+/**
+ * Some OpenAI-compatible gateways (for example, a LiteLLM bridge) split one
+ * reply into several choices, with an empty or preamble choice first and the
+ * answer last. Return the last item whose text is usable.
+ */
+export function findLastWithUsableText<T>(
+  items: readonly T[],
+  getText: (item: T) => string | null | undefined,
+): T | undefined {
+  for (let index = items.length - 1; index >= 0; index -= 1) {
+    if (hasUsableText(getText(items[index]))) {
+      return items[index];
+    }
+  }
+  return undefined;
+}
+
 /** Chat Completions cannot replay Responses output items as messages. */
 export function toChatMessages(
   messages: ModelCallMessages,
