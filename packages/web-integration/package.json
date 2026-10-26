@@ -90,6 +90,11 @@
       "require": "./dist/lib/common/agent.js",
       "import": "./dist/es/common/agent.mjs"
     },
+    "./browser-harness": {
+      "types": "./dist/types/browser-harness/index.d.ts",
+      "require": "./dist/lib/browser-harness/index.js",
+      "import": "./dist/es/browser-harness/index.mjs"
+    },
     "./static": {
       "types": "./dist/types/static/index.d.ts",
       "require": "./dist/lib/static/index.js",
