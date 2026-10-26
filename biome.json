@@ -36,7 +36,8 @@
       "**/dump-for-utils-test.json",
       "**/.rslib",
       "**/.native-build/**",
-      "apps/chrome-extension/web-ext-profile/**"
+      "apps/chrome-extension/web-ext-profile/**",
+      "packages/web-integration/src/browser-harness/vendor/**"
     ]
   },
   "javascript": {
