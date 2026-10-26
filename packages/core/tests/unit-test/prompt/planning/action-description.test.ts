@@ -420,7 +420,8 @@ describe('buildActionDescription and serializeActionDescriptions', () => {
         param:
           value:
             type: string | number
-            description: The text to input. Provide the final content for replace mode, only the inserted characters for typeOnly mode, or an empty string when using clear mode to remove existing text.
+            optional: true
+            description: The text to input. Required unless mode is "clear". Provide the final content for replace mode, only the inserted characters for typeOnly mode, or omit it (or pass an empty string) when using clear mode to remove existing text.
           locate:
             type: '{ prompt: string /* description of the target element */ }'
             optional: true

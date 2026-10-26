@@ -548,11 +548,14 @@ export const defineActionHover = (
 const inputLocateDescription =
   'the position of the placeholder or text content in the target input field. If there is no content, locate the center of the input field.';
 export const actionInputParamSchema = z.object({
+  // Optional only so "clear" mode can omit it; every other mode refuses to run
+  // without a value.
   value: z
     .union([z.string(), z.number()])
-    .transform((val) => String(val))
+    .optional()
+    .transform((val) => (val === undefined ? undefined : String(val)))
     .describe(
-      'The text to input. Provide the final content for replace mode, only the inserted characters for typeOnly mode, or an empty string when using clear mode to remove existing text.',
+      'The text to input. Required unless mode is "clear". Provide the final content for replace mode, only the inserted characters for typeOnly mode, or omit it (or pass an empty string) when using clear mode to remove existing text.',
     ),
   locate: getMidsceneLocationSchema()
     .describe(inputLocateDescription)
@@ -585,7 +588,8 @@ export const actionInputParamSchema = z.object({
     ),
 });
 export type ActionInputParam = {
-  value: string;
+  /** Required unless `mode` is `'clear'`. */
+  value?: string;
   locate?: LocateResultElement;
   mode?: 'replace' | 'clear' | 'typeOnly' | 'append';
   autoDismissKeyboard?: boolean;
@@ -616,7 +620,13 @@ export const defineActionInput = (
         return;
       }
 
-      if (!param || !param.value) {
+      if (param.value === undefined) {
+        throw new Error(
+          'Input needs a value: pass the text to type, or use mode "clear" to empty the field',
+        );
+      }
+
+      if (!param.value) {
         return;
       }
 
