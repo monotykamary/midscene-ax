@@ -1,6 +1,9 @@
+import { prepareModelImage } from '@/ai-model/model-adapter/image-preprocess';
 import { ResolvedModelAdapter } from '@/ai-model/model-adapter/resolve';
 import { gptAdapters } from '@/ai-model/models/gpt';
+import { localImg2Base64 } from '@midscene/shared/img';
 import { describe, expect, it } from '@rstest/core';
+import { getFixture } from '../../utils';
 
 const gpt5Adapter = new ResolvedModelAdapter(gptAdapters['gpt-5'], 'gpt-5');
 const gpt6Adapter = new ResolvedModelAdapter(gptAdapters['gpt-6'], 'gpt-6');
@@ -209,16 +212,61 @@ describe('gpt model adapter', () => {
       gpt5Adapter.resolveImageDetail({
         intent: 'planning',
       }),
-    ).toBe('high');
-    expect(gpt5Adapter.resolveImageDetail({ intent: 'default' })).toBe('high');
+    ).toBe('original');
+    expect(gpt5Adapter.resolveImageDetail({ intent: 'default' })).toBe(
+      'original',
+    );
+    expect(gpt5Adapter.resolveImageDetail({ intent: 'insight' })).toBe(
+      'original',
+    );
     expect(
       gpt5Adapter.resolveImageDetail({
         intent: 'planning',
         requiresOriginalImageDetail: true,
       }),
     ).toBe('original');
-    expect(gpt5Adapter.imagePreprocess).toEqual({});
+    expect(gpt5Adapter.imagePreprocess).toEqual({ padBlockSize: 32 });
   });
+
+  it('keeps GPT-6 high detail outside locate', () => {
+    expect(gpt6Adapter.resolveImageDetail({ intent: 'locate' })).toBe(
+      'original',
+    );
+    expect(gpt6Adapter.resolveImageDetail({ intent: 'planning' })).toBe('high');
+    expect(gpt6Adapter.imagePreprocess).toEqual({ padBlockSize: 32 });
+  });
+
+  it.each([
+    ['gpt-5', gpt5Adapter],
+    ['gpt-6', gpt6Adapter],
+  ] as const)(
+    'pads %s screenshots to 32px blocks without shifting locate results',
+    async (_family, adapter) => {
+      const prepared = await prepareModelImage({
+        imageBase64: localImg2Base64(getFixture('baidu.png')),
+        width: 3282,
+        height: 1442,
+        policy: adapter.imagePreprocess,
+      });
+      expect(prepared.preparedSize).toEqual({ width: 3296, height: 1472 });
+      expect(prepared.contentSize).toEqual({ width: 3282, height: 1442 });
+      // The padded image is still sent at full resolution for locate.
+      expect(adapter.resolveImageDetail({ intent: 'locate' })).toBe('original');
+      if (adapter.locate.kind !== 'standard') {
+        throw new Error('GPT should use the standard locate adapter');
+      }
+      const codec = adapter.locate.element.resultCodec;
+      // Padding is appended right/bottom, so pixel bboxes map one to one.
+      expect(codec.toPixelResult([100, 200, 300, 400], prepared)).toEqual({
+        center: [200, 300],
+        rect: { left: 100, top: 200, width: 201, height: 201 },
+      });
+      // A box reaching into the padding is clipped to the real screenshot.
+      expect(
+        codec.toPixelResult([3200, 1400, 3295, 1471], prepared).rect,
+      ).toEqual({ left: 3200, top: 1400, width: 82, height: 42 });
+    },
+  );
 
   it('defaults gpt-5 reasoning to disabled when reasoning config is unset', () => {
     const result = gpt5Adapter.chatCompletion.buildChatCompletionParams({
