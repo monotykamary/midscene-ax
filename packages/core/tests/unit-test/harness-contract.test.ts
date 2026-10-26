@@ -587,6 +587,48 @@ describe('harness contract: acting on refs', () => {
     });
   });
 
+  it('acts at coordinates without calling actOnRef when the interface declines the operation', async () => {
+    const device = new HarnessInterface() as HarnessInterface & {
+      supportsRefOperation: AbstractInterface['supportsRefOperation'];
+    };
+    const supportsSpy = rs.fn(async () => false);
+    device.supportsRefOperation = supportsSpy;
+    const tapAction = tap();
+    const { run, task } = await runPlan(device, tapAction, tapPlan());
+    await run;
+
+    expect(supportsSpy).toHaveBeenCalledWith(
+      loginMatch,
+      'tap',
+      undefined,
+      undefined,
+    );
+    expect(device.actSpy).not.toHaveBeenCalled();
+    expect(tapAction.call).toHaveBeenCalledTimes(1);
+    expect(tapAction.call.mock.calls[0][0].locate.center).toEqual([30, 25]);
+    expect(task.receipt).toBeUndefined();
+    expect(task.refAct).toEqual({
+      ref: 'e12',
+      operation: 'tap',
+      fallback: 'coordinates',
+      declined: true,
+    });
+  });
+
+  it('acts on the ref when the interface supports the operation', async () => {
+    const device = new HarnessInterface() as HarnessInterface & {
+      supportsRefOperation: AbstractInterface['supportsRefOperation'];
+    };
+    device.supportsRefOperation = rs.fn(async () => true);
+    const tapAction = tap();
+    const { run, task } = await runPlan(device, tapAction, tapPlan());
+    await run;
+
+    expect(device.actSpy).toHaveBeenCalledTimes(1);
+    expect(tapAction.call).not.toHaveBeenCalled();
+    expect(task.refAct).toEqual({ ref: 'e12', operation: 'tap' });
+  });
+
   it('throws with the reason when the action is blocked', async () => {
     const device = new HarnessInterface();
     device.receipt = {

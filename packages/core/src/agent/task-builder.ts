@@ -500,6 +500,22 @@ export class TaskBuilder {
     const { match, operation, payload } = refAction;
     const refAct: RefActRecord = { ref: match.ref, operation };
     task.refAct = refAct;
+    if (this.interface.supportsRefOperation) {
+      const supported = await this.interface.supportsRefOperation(
+        match,
+        operation,
+        payload,
+        abortSignal,
+      );
+      abortSignal?.throwIfAborted();
+      if (!supported) {
+        // Nothing was sent: the interface cannot perform this operation on
+        // this element by ref, so the located point is used as usual.
+        refAct.fallback = 'coordinates';
+        refAct.declined = true;
+        return callByCoordinates();
+      }
+    }
     const receipt = await this.interface.actOnRef!(
       match,
       operation,
