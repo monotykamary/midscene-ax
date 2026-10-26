@@ -15,6 +15,7 @@ import type {
   DetailedLocateParam,
   DeviceAction,
   ElementCacheFeature,
+  ExecutionTask,
   ExecutionTaskActionApply,
   ExecutionTaskApply,
   ExecutionTaskHitBy,
@@ -23,13 +24,23 @@ import type {
   LocateResultWithDump,
   PlanningAction,
   Rect,
+  RefActRecord,
+  RefOperation,
   ServiceDump,
+  TreeMatch,
 } from '@/types';
 import { ServiceError } from '@/types';
 import { getDebug } from '@midscene/shared/logger';
 import { assert } from '@midscene/shared/utils';
 import type { ActionReadiness } from './action-readiness';
 import type { TaskCache } from './task-cache';
+import {
+  RefActionBlockedError,
+  TREE_HIT_SOURCE,
+  refOperationForAction,
+  resolveTreeLocate,
+  treeQueryForLocate,
+} from './tree-locate';
 import { withUsageIntent } from './usage-intent';
 import {
   ifLocateParamHasLocatedPixelResult,
@@ -133,6 +144,10 @@ export class TaskBuilder {
   private readonly waitAfterAction?: number;
   private readonly actionReadiness?: ActionReadiness;
   private readonly operationResource: object;
+
+  // Tree matches from recent tree-rung hits, keyed by ref, so an action can
+  // hand the interface the full match it located.
+  private readonly treeMatches = new Map<string, TreeMatch>();
 
   constructor({
     getDefaultModelRuntime,
@@ -348,13 +363,27 @@ export class TaskBuilder {
         abortSignal?.throwIfAborted();
         setTimingFieldOnce(timing, 'callActionStart');
         debug('calling action', action.name);
-        const actionResult = await action.call.call(
-          this.interface,
-          parsedParam,
-          useDefaultWait
-            ? { ...taskContext, signal: abortSignal }
-            : { ...taskContext, signal: abortSignal, skipDefaultWait: true },
-        );
+        const callByCoordinates = () =>
+          action.call.call(
+            this.interface,
+            parsedParam,
+            useDefaultWait
+              ? { ...taskContext, signal: abortSignal }
+              : { ...taskContext, signal: abortSignal, skipDefaultWait: true },
+          );
+        const refAction = this.refActionFor(action.name, parsedParam);
+        let actionResult: Awaited<ReturnType<typeof callByCoordinates>>;
+        if (refAction) {
+          actionResult = await this.callByRef(
+            action.name,
+            refAction,
+            taskContext.task,
+            callByCoordinates,
+            abortSignal,
+          );
+        } else {
+          actionResult = await callByCoordinates();
+        }
         setTimingFieldOnce(timing, 'callActionEnd');
         debug('called action', action.name, 'result:', actionResult);
         abortSignal?.throwIfAborted();
@@ -408,6 +437,113 @@ export class TaskBuilder {
     };
 
     context.tasks.push(task);
+  }
+
+  /**
+   * The ref operation for an action whose `locate` came from the tree, when
+   * the interface can act on refs and the action maps to an operation.
+   */
+  private refActionFor(
+    actionName: string,
+    parsedParam: Record<string, any> | undefined,
+  ):
+    | { match: TreeMatch; operation: RefOperation; payload?: string }
+    | undefined {
+    const located: LocateResultElement | undefined = parsedParam?.locate;
+    if (!located?.nodeRef || !this.interface.actOnRef) {
+      return undefined;
+    }
+    const plan = refOperationForAction(actionName, parsedParam);
+    if (!plan) {
+      return undefined;
+    }
+    const remembered = this.treeMatches.get(located.nodeRef);
+    const match: TreeMatch =
+      remembered && remembered.revision === located.treeRevision
+        ? remembered
+        : {
+            // The element carries a ref the builder did not locate itself;
+            // hand over what it knows (center is already logical here).
+            ref: located.nodeRef,
+            rect: {
+              left: located.center[0],
+              top: located.center[1],
+              width: 0,
+              height: 0,
+            },
+            role: '',
+            name: located.description,
+            ...(located.treeRevision !== undefined
+              ? { revision: located.treeRevision }
+              : {}),
+          };
+    return { match, ...plan };
+  }
+
+  /**
+   * Act once through `actOnRef` and apply the receipt: `executed` is done,
+   * `stale` falls back once to the coordinate path, `blocked` throws with the
+   * reason (never retried by coordinates), and `outcome_unknown` is recorded
+   * without claiming a verified success.
+   */
+  private async callByRef(
+    actionName: string,
+    refAction: { match: TreeMatch; operation: RefOperation; payload?: string },
+    task: ExecutionTask,
+    callByCoordinates: () => unknown,
+    abortSignal?: AbortSignal,
+  ): Promise<unknown> {
+    const { match, operation, payload } = refAction;
+    const refAct: RefActRecord = { ref: match.ref, operation };
+    task.refAct = refAct;
+    const receipt = await this.interface.actOnRef!(
+      match,
+      operation,
+      payload,
+      abortSignal,
+    );
+    abortSignal?.throwIfAborted();
+    if (!receipt?.status) {
+      throw new Error(
+        `actOnRef returned no receipt for ${actionName} on element ${match.ref}`,
+      );
+    }
+    debug('actOnRef receipt', actionName, operation, match.ref, receipt);
+    switch (receipt.status) {
+      case 'executed':
+        task.receipt = receipt;
+        return undefined;
+      case 'stale':
+        task.receipt = receipt;
+        refAct.fallback = 'coordinates';
+        return callByCoordinates();
+      case 'blocked':
+        task.receipt = receipt;
+        throw new RefActionBlockedError(actionName, match.ref, receipt);
+      case 'outcome_unknown':
+        task.receipt = {
+          ...receipt,
+          verified: receipt.verified === true ? null : receipt.verified,
+        };
+        if (!task.planningFeedback) {
+          task.planningFeedback = `${actionName} on element ${match.ref} was sent, but its outcome is unknown${receipt.reason ? ` (${receipt.reason})` : ''}. Check the screen before relying on it.`;
+        }
+        return undefined;
+      default:
+        throw new Error(
+          `actOnRef returned an unknown receipt status for ${actionName}: ${JSON.stringify(receipt)}`,
+        );
+    }
+  }
+
+  private rememberTreeMatch(match: TreeMatch): void {
+    this.treeMatches.delete(match.ref);
+    this.treeMatches.set(match.ref, match);
+    while (this.treeMatches.size > 64) {
+      const oldest = this.treeMatches.keys().next().value;
+      if (oldest === undefined) break;
+      this.treeMatches.delete(oldest);
+    }
   }
 
   private createLocateTask(
@@ -467,7 +603,9 @@ export class TaskBuilder {
           : undefined;
 
         assert(
-          locateParam?.prompt || paramWithLocatedPixelResult,
+          locateParam?.prompt ||
+            paramWithLocatedPixelResult ||
+            locateParam?.tree,
           `No prompt or id or position or locatedPixelResult to locate, param=${JSON.stringify(
             locateParam,
           )}`,
@@ -567,12 +705,59 @@ export class TaskBuilder {
 
         const isXpathHit = !!elementFromXpath;
 
+        // from the accessibility tree: deterministic, exactly one perceivable
+        // match or abstain and let cache / AI locate decide.
+        let elementFromTree: LocateResultElement | undefined;
+        let treeMatch: TreeMatch | undefined;
+        const treeQuery =
+          !isPlanDirectHit && !isXpathHit && this.interface.locateInTree
+            ? treeQueryForLocate(locateParam)
+            : undefined;
+        if (treeQuery) {
+          const outcome = await resolveTreeLocate(
+            this.interface,
+            treeQuery,
+            abortSignal,
+          );
+          task.treeLocate = outcome.record;
+          if (outcome.match) {
+            treeMatch = outcome.match;
+            const { rect, ref, revision } = treeMatch;
+            elementFromTree = transformLogicalElementToScreenshot(
+              {
+                center: [
+                  rect.left + rect.width / 2,
+                  rect.top + rect.height / 2,
+                ],
+                description:
+                  (typeof locateParam.prompt === 'string'
+                    ? locateParam.prompt
+                    : locateParam.prompt?.prompt) ||
+                  `${treeMatch.role} "${treeMatch.name}"`,
+                rect,
+                nodeRef: ref,
+                ...(revision !== undefined ? { treeRevision: revision } : {}),
+              },
+              shrunkShotToLogicalRatio,
+            );
+            this.rememberTreeMatch(treeMatch);
+          } else {
+            debug(
+              'tree locate abstained, query=%o, reason=%s',
+              treeQuery,
+              outcome.record.reason,
+            );
+          }
+        }
+
+        const isTreeHit = !!elementFromTree;
+
         const cachePrompt = locateParam.prompt;
         const locateCacheRecord = this.taskCache?.matchLocateCache(cachePrompt);
         const cacheEntry = locateCacheRecord?.cacheContent?.cache;
 
         const elementFromCacheResult =
-          isPlanDirectHit || isXpathHit
+          isPlanDirectHit || isXpathHit || isTreeHit
             ? null
             : await matchElementFromCache(
                 {
@@ -596,7 +781,13 @@ export class TaskBuilder {
 
         let elementFromAiLocate: LocateResultElement | null | undefined;
         const timing = taskContext.task.timing;
-        if (!isXpathHit && !isCacheHit && !isPlanDirectHit) {
+        if (!isXpathHit && !isTreeHit && !isCacheHit && !isPlanDirectHit) {
+          if (!locateParam.prompt && locateParam.tree) {
+            // A tree-only address has nothing for AI locate to fall back on.
+            throw new Error(
+              `Element not found in the accessibility tree: ${task.treeLocate?.reason ?? 'the interface cannot locate in its tree'}, query=${JSON.stringify(locateParam.tree)}`,
+            );
+          }
           try {
             setTimingFieldOnce(timing, 'callAiStart');
             locateResult = await this.service.locate(
@@ -623,6 +814,7 @@ export class TaskBuilder {
         const element =
           elementFromPlan ||
           elementFromXpath ||
+          elementFromTree ||
           elementFromCache ||
           elementFromAiLocate;
 
@@ -648,10 +840,14 @@ export class TaskBuilder {
         // 3. not a cache hit (otherwise we'd be writing what we just read)
         // 4. not already cached for plan hit case (avoid redundant writes), OR allow update if cache validation failed
         // 5. cacheable is not explicitly false
+        // 6. not a tree hit: the tree rung runs before the cache and resolves
+        //    again on the next run, and a cached point must not stand in for
+        //    the tree when it later abstains on an ambiguous or hidden target
         if (
           element &&
           this.taskCache &&
           !isCacheHit &&
+          !isTreeHit &&
           (!isPlanDirectHit || !locateCacheAlreadyExists) &&
           locateParam.cacheable !== false
         ) {
@@ -732,6 +928,17 @@ export class TaskBuilder {
             from: 'User expected path',
             context: {
               xpath: locateParam.xpath,
+            },
+          };
+        } else if (isTreeHit && treeMatch) {
+          hitBy = {
+            from: TREE_HIT_SOURCE,
+            context: {
+              query: treeQuery,
+              ref: treeMatch.ref,
+              role: treeMatch.role,
+              name: treeMatch.name,
+              revision: treeMatch.revision,
             },
           };
         } else if (isCacheHit) {
