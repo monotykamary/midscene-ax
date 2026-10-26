@@ -372,6 +372,7 @@ export function buildDetailedLocateParam(
     deepLocate,
     cacheable,
     xpath,
+    ...(opt?.tree ? { tree: opt.tree } : {}),
   };
 }
 

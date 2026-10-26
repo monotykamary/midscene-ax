@@ -166,17 +166,115 @@ export interface AgentDescribeElementAtPointResult {
  * context
  */
 
+export type TreePlatform =
+  | 'android'
+  | 'harmony'
+  | 'ios'
+  | 'web'
+  | 'macos'
+  | 'windows';
+
 export interface UiNode {
   type: string;
   attrs: Record<string, string | undefined>;
   bounds: Rect;
   children: UiNode[];
+  /** Opaque handle for this node, valid only for the snapshot's revision. */
+  ref?: string;
 }
 
 export interface UITreeSnapshot {
-  platform: 'android';
+  platform: TreePlatform;
   capturedAt: number;
   root: UiNode;
+  /** Identifies the tree state that node refs belong to. */
+  revision?: string;
+}
+
+/*
+ * Harness contract: an interface that can read its accessibility tree may
+ * locate and act on elements by tree address instead of by screenshot
+ * coordinates. The tree is the action address space; vision (AI locate) stays
+ * the fallback. All of it is optional on `AbstractInterface`.
+ */
+
+/**
+ * A tree address: an opaque ref from an earlier snapshot or match, or an
+ * accessible role and name. `exact` asks for a whole-string, case-sensitive
+ * name match after whitespace normalisation. `context` names an ancestor or
+ * region that scopes the search (e.g. a dialog title).
+ */
+export type TreeQuery =
+  | { ref: string }
+  | { role?: string; name: string; exact?: boolean; context?: string };
+
+/** Whether a user could see the element; `why` explains a failure. */
+export interface Perceivability {
+  perceivable: boolean;
+  /** e.g. "covered by …", "opacity 0 on ancestor …", "offscreen". */
+  why?: string;
+}
+
+/** One element the interface found for a `TreeQuery`. */
+export interface TreeMatch {
+  ref: string;
+  /** Bounds in logical (device-independent) coordinates, like `size()`. */
+  rect: Rect;
+  role: string;
+  name: string;
+  revision?: string;
+  /** Present when the interface checked perceivability while matching. */
+  perceivable?: Perceivability;
+}
+
+/**
+ * Outcome of acting on a ref:
+ * - `executed`: the operation ran on the element the ref named.
+ * - `stale`: the ref no longer names a live element; nothing was done.
+ * - `blocked`: the element exists but the operation was refused (covered,
+ *   disabled, outside the allowed origin, ...); nothing was done.
+ * - `outcome_unknown`: the operation was sent but its effect is not known.
+ */
+export type ActStatus = 'executed' | 'stale' | 'blocked' | 'outcome_unknown';
+
+export interface ActReceipt {
+  status: ActStatus;
+  /** true / false when the interface checked the effect, null when it did not. */
+  verified: boolean | null;
+  reason?: string;
+  /** Short description of what changed, when the interface can tell. */
+  diff?: string;
+  /** Tree revision after the operation. */
+  revision?: string;
+}
+
+export type RefOperation =
+  | 'tap'
+  | 'doubleClick'
+  | 'rightClick'
+  | 'hover'
+  | 'input'
+  | 'clear'
+  | 'keyboardPress'
+  | 'select'
+  | 'scrollIntoView';
+
+/** Why the tree rung of the locate chain hit or abstained, kept in dumps. */
+export interface TreeLocateRecord {
+  query: TreeQuery;
+  outcome: 'hit' | 'abstained';
+  reason?: string;
+  matchCount?: number;
+  ref?: string;
+  revision?: string;
+}
+
+/** How an action used a located element's ref, kept in dumps. */
+export interface RefActRecord {
+  ref: string;
+  operation: RefOperation;
+  /** Set when a `stale` receipt sent the action down the coordinate path. */
+  fallback?: 'coordinates';
 }
 
 export abstract class UIContext {
@@ -709,6 +807,12 @@ export type ExecutionTask<
     searchArea?: Rect;
     searchAreaUsage?: AIUsageInfo;
     reasoning_content?: string;
+    /** Locate tasks: what the accessibility-tree rung did. */
+    treeLocate?: TreeLocateRecord;
+    /** Action tasks: the receipt returned by `actOnRef`. */
+    receipt?: ActReceipt;
+    /** Action tasks: the ref and operation the action was sent as. */
+    refAct?: RefActRecord;
   };
 
 export interface IExecutionDump extends DumpMeta {

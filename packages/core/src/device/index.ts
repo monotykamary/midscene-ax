@@ -11,9 +11,14 @@ import { getDebug } from '@midscene/shared/logger';
 import { _keyDefinitions } from '@midscene/shared/us-keyboard-layout';
 import { z } from 'zod';
 import type {
+  ActReceipt,
   ElementCacheFeature,
+  Perceivability,
   Rect,
+  RefOperation,
   Size,
+  TreeMatch,
+  TreeQuery,
   UIContext,
   UITreeSnapshot,
 } from '../types';
@@ -225,6 +230,34 @@ export abstract class AbstractInterface {
   ): Promise<Rect>;
 
   abstract getUITree?(): Promise<UITreeSnapshot>;
+
+  /**
+   * Harness contract (optional). Find elements in the accessibility tree.
+   * Return every match; core acts only when there is exactly one perceivable
+   * match and otherwise falls back to AI locate. Never widen the query on the
+   * interface side (no fuzzy names when `exact` is set).
+   */
+  locateInTree?(query: TreeQuery, signal?: AbortSignal): Promise<TreeMatch[]>;
+
+  /**
+   * Harness contract (optional). Perform one operation on a matched element
+   * by its ref and report what happened. Revalidate the ref before acting and
+   * return `stale` or `blocked` rather than acting on something else. Act at
+   * most once; never retry by coordinates inside this method.
+   */
+  actOnRef?(
+    match: TreeMatch,
+    operation: RefOperation,
+    payload?: string,
+    signal?: AbortSignal,
+  ): Promise<ActReceipt>;
+
+  /**
+   * Harness contract (optional). Whether a user could perceive the element
+   * (on screen, not covered, not transparent). Used when a `TreeMatch` does
+   * not already carry `perceivable`.
+   */
+  perceivable?(match: TreeMatch, signal?: AbortSignal): Promise<Perceivability>;
 
   abstract destroy?(): Promise<void>;
 
