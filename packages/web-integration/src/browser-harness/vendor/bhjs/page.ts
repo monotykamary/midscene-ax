@@ -342,7 +342,11 @@ export class Page {
     }
     // flow-pilot patch: resolve role locators on large pages too (the documented maximum, not the 50k default).
     const snapshot = await this.snapshotInternal({ frameId: query.frameId, maxChars: 1_000_000 }, signal);
-    if (snapshot.truncated) throw new Error('Strict locator requires a complete snapshot; narrow the frame or use a selector');
+    // flow-pilot patch: frames the guard cannot read or act in (cross-origin ads and trackers, frames not yet
+    // committed) do not make a match ambiguous; uniqueness is judged over the content that can be acted on.
+    const unreadableOnly = snapshot.omissions.every(o => /: (origin_denied|not committed)$/.test(o));
+    const renderTruncated = snapshot.tree.includes('[snapshot truncated');
+    if (snapshot.truncated && (renderTruncated || !unreadableOnly)) throw new Error('Strict locator requires a complete snapshot; narrow the frame or use a selector');
     const matches = [...this.refs.values()].filter(ref => ref.role === query.role &&
       (query.options.name === undefined || (query.options.exact === false ? ref.name.includes(query.options.name) : ref.name === query.options.name)) &&
       (query.options.context === undefined || ref.context === query.options.context));
