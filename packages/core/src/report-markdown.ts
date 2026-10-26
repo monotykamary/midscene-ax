@@ -9,6 +9,7 @@ import type {
   ModelBrief,
   ReportActionDump,
 } from '@/types';
+import { redactDumpText } from './dump/redaction';
 import type { ScreenshotRef } from './dump/screenshot-store';
 import {
   imageRefFileExtension,
@@ -713,7 +714,8 @@ export function executionToMarkdown(
   execution: ExecutionDump | IExecutionDump,
   options?: ExecutionMarkdownOptions,
 ): ExecutionMarkdownResult {
-  return renderExecution(execution, 0, options);
+  const rendered = renderExecution(execution, 0, options);
+  return { ...rendered, markdown: redactDumpText(rendered.markdown) };
 }
 
 export function reportToMarkdown(
@@ -808,7 +810,9 @@ export function reportToMarkdown(
     .join('\n');
 
   return {
-    markdown: `${header}\n\n${executionResults.map((item) => item.markdown).join('\n\n---\n\n')}`,
+    markdown: redactDumpText(
+      `${header}\n\n${executionResults.map((item) => item.markdown).join('\n\n---\n\n')}`,
+    ),
     attachments,
   };
 }

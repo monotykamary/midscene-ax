@@ -7,12 +7,13 @@ import {
   type TestRunReportDump,
 } from '../test-run-report';
 import type { AIUsageInfo, IReportActionDump, ModelBrief } from '../types';
+import { redactDumpJsonValue, redactDumpText } from './redaction';
 
 export const escapeContent = escapeScriptTag;
 export const unescapeContent = antiEscapeScriptTag;
 
 function cleanHtmlCommentValue(value: unknown): string {
-  return String(value ?? 'N/A')
+  return redactDumpText(String(value ?? 'N/A'))
     .replace(/\0/g, '')
     .replace(/--/g, '- -');
 }
@@ -114,7 +115,7 @@ export function generateTestRunReportScriptTag(
     'script type="',
     TEST_RUN_REPORT_SCRIPT_TYPE,
     '">\n',
-    escapeScriptTag(JSON.stringify(dump)),
+    escapeScriptTag(JSON.stringify(dump, redactDumpJsonValue)),
     '\n',
     htmlScriptCloseTag(),
     '\n',

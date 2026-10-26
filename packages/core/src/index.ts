@@ -97,12 +97,19 @@ export {
   generateDumpScriptTag,
   deriveTaskStatus,
   deriveCaseStatus,
+  registerDumpTextRedactor,
+  registerDumpSecret,
+  clearDumpTextRedactors,
+  hasDumpTextRedactor,
+  redactDumpText,
 } from './dump';
 export type {
   TaskStatusFields,
   DerivedTaskStatus,
   RestoredScreenshotReference,
   StoredImageReferenceResolver,
+  DumpTextRedactor,
+  DumpSecretOptions,
 } from './dump';
 export {
   getTaskSearchArea,
