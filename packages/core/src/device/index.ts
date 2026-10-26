@@ -253,6 +253,21 @@ export abstract class AbstractInterface {
   ): Promise<ActReceipt>;
 
   /**
+   * Harness contract (optional). Whether `actOnRef` can perform this
+   * operation on this element at all (for example, the interface may only
+   * click, type and press some keys by ref). Return false to have Midscene act
+   * at the located coordinates instead; nothing must be sent to the element.
+   * A refusal that depends on the element's state (disabled, covered) is not
+   * a reason to return false: let `actOnRef` return `blocked`.
+   */
+  supportsRefOperation?(
+    match: TreeMatch,
+    operation: RefOperation,
+    payload?: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+
+  /**
    * Harness contract (optional). Whether a user could perceive the element
    * (on screen, not covered, not transparent). Used when a `TreeMatch` does
    * not already carry `perceivable`.

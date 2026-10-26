@@ -246,6 +246,11 @@ export interface ActReceipt {
   diff?: string;
   /** Tree revision after the operation. */
   revision?: string;
+  /**
+   * Set when the interface found the original ref stale and acted on the one
+   * element with the same identity in a fresh tree instead.
+   */
+  rebound?: { from: string; to: string };
 }
 
 export type RefOperation =
@@ -273,8 +278,13 @@ export interface TreeLocateRecord {
 export interface RefActRecord {
   ref: string;
   operation: RefOperation;
-  /** Set when a `stale` receipt sent the action down the coordinate path. */
+  /**
+   * Set when the action went down the coordinate path: after a `stale`
+   * receipt, or when the interface declined the operation (`declined`).
+   */
   fallback?: 'coordinates';
+  /** `supportsRefOperation` returned false, so `actOnRef` was not called. */
+  declined?: boolean;
 }
 
 export abstract class UIContext {
