@@ -37,6 +37,15 @@ export {
   generateImageScriptTag,
   generateDumpScriptTag,
 } from './html-utils';
+export {
+  registerDumpTextRedactor,
+  registerDumpSecret,
+  clearDumpTextRedactors,
+  hasDumpTextRedactor,
+  redactDumpText,
+  type DumpTextRedactor,
+  type DumpSecretOptions,
+} from './redaction';
 export { getTaskSearchArea, getTaskServiceDump } from './task-service-dump';
 export {
   deriveTaskStatus,
