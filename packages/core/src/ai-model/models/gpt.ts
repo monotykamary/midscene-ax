@@ -16,6 +16,20 @@ const originalImageDetailForLocateIntent: ResolveImageDetail = (input) =>
     ? 'original'
     : (input.imageDetail ?? 'high');
 
+// GPT-5 reads text in assertions, queries and waits as well as locating, and
+// providers such as the Codex app-server downscale any image not sent as
+// 'original'. Default every intent to full resolution; an explicit per-image
+// detail is still honored outside locate.
+const originalImageDetailForEveryIntent: ResolveImageDetail = (input) =>
+  isLocateIntent(input.intent) || input.requiresOriginalImageDetail
+    ? 'original'
+    : (input.imageDetail ?? 'original');
+
+// Some OpenAI-compatible gateways stretch an image to a multiple of 32 pixels
+// before the model sees it, so returned coordinates come back stretched.
+// Padding to that size first keeps one image pixel per screen pixel.
+const gptImagePreprocess = { padBlockSize: 32 };
+
 const resolveGpt5ReasoningEffort = ({
   reasoningEnabled,
   reasoningEffort,
@@ -149,7 +163,8 @@ const buildGpt6ChatCompletionParams = (
 export const gptAdapters = {
   'gpt-5': {
     supportedProtocols: ['openai-chat', 'openai-responses'],
-    resolveImageDetail: originalImageDetailForLocateIntent,
+    resolveImageDetail: originalImageDetailForEveryIntent,
+    imagePreprocess: gptImagePreprocess,
     responses: {
       replayRawAssistantOutput: false,
       unsupportedUserConfig: ['reasoningBudget'],
@@ -171,6 +186,7 @@ export const gptAdapters = {
   'gpt-6': {
     supportedProtocols: ['openai-chat', 'openai-responses'],
     resolveImageDetail: originalImageDetailForLocateIntent,
+    imagePreprocess: gptImagePreprocess,
     responses: {
       replayRawAssistantOutput: false,
       unsupportedUserConfig: ['temperature', 'reasoningBudget'],
