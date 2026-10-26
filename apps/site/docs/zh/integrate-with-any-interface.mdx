@@ -350,6 +350,8 @@ class MyInterface extends AbstractInterface {
   - `stale`：ref 已失效，Midscene 按坐标执行一次该动作，并记录 `refAct.fallback: 'coordinates'`。
   - `blocked`：Midscene 抛出带有 `reason` 的错误，不会改用坐标重试。
   - `outcome_unknown`：记录结果，`verified` 不会为 `true`，并提示下一轮规划先检查屏幕。
+- **拒绝某个操作。** 如果 `actOnRef` 只能执行部分操作（例如 harness 没有受保护的悬停或双击），还需实现 `supportsRefOperation(match, operation, payload?, signal?): Promise<boolean>`。返回 `false` 时，Midscene 不调用 `actOnRef`，而是按定位到的坐标操作，并记录 `refAct.declined: true`。由元素状态导致的拒绝（禁用、被遮挡）不应通过这里拒绝：应返回 `blocked` 回执，让原因传到该步骤。
+- **重新绑定失效的 ref。** 在返回 `stale` 之前，界面可以在新的无障碍树中对身份相同的唯一元素执行操作，并通过 `receipt.rebound: { from, to }` 报告。实现了这一点的 Web 界面见 [browser-harness-js](./integrate-with-browser-harness)。
 
 未实现这些方法的界面，行为与之前完全一致。
 

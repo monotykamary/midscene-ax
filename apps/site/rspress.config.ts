@@ -224,6 +224,10 @@ export default defineConfig(async () => {
             link: '/platforms/web',
           },
           {
+            text: 'Integrate with browser-harness-js',
+            link: '/integrate-with-browser-harness',
+          },
+          {
             text: 'Chrome Bridge',
             link: '/bridge-mode',
           },
@@ -477,6 +481,10 @@ export default defineConfig(async () => {
           {
             text: 'Web',
             link: '/zh/platforms/web',
+          },
+          {
+            text: '集成到 browser-harness-js',
+            link: '/zh/integrate-with-browser-harness',
           },
           {
             text: 'Chrome Bridge',

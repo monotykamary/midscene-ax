@@ -378,6 +378,8 @@ class MyInterface extends AbstractInterface {
   - `stale`: the ref no longer names a live element, so Midscene runs the action once at coordinates and records `refAct.fallback: 'coordinates'`.
   - `blocked`: Midscene throws with the receipt's `reason` and does not retry at coordinates.
   - `outcome_unknown`: recorded with `verified` never `true`, and the next planning round is told to check the screen.
+- **Declining an operation.** If `actOnRef` can perform only some operations (for example, a harness with no guarded hover or double click), also implement `supportsRefOperation(match, operation, payload?, signal?): Promise<boolean>`. When it returns `false`, Midscene does not call `actOnRef`, acts at the located coordinates, and records `refAct.declined: true`. A refusal that depends on the element's state (disabled, covered) is not a reason to decline: return a `blocked` receipt so the reason reaches the step.
+- **Rebinding a stale ref.** Before answering `stale`, an interface may act on the one element with the same identity in a fresh tree; it reports that as `receipt.rebound: { from, to }`. See [browser-harness-js](./integrate-with-browser-harness) for a web interface that does this.
 
 Interfaces without these methods behave exactly as before.
 

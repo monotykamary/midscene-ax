@@ -1,0 +1,83 @@
+import SetupEnv from './common/setup-env.mdx';
+
+# Integrate with browser-harness-js
+
+`@midscene/web/browser-harness` drives Chrome over raw CDP through [browser-harness-js](https://github.com/monotykamary/browser-harness-js). It implements Midscene's [accessibility tree contract](./integrate-with-any-interface#accessibility-tree-contract-optional), so the browser's accessibility tree is where actions are addressed and the model is the fallback.
+
+## Tree first, vision fallback
+
+When you call `agent.aiTap('Log in')`, Midscene asks the page for every element in the accessibility snapshot whose accessible name is exactly `Log in`:
+
+- **Exactly one match that a user could see**: the element is bound by its ref, and the tap goes through browser-harness-js's guarded locator. The locator re-checks that the ref still names the same element, that it is enabled and not covered, acts once, and returns a receipt (`executed`, `stale`, `blocked` or `outcome_unknown`). No model is called.
+- **No match, several matches, or a match a user could not see**: the tree abstains and Midscene locates the element from the screenshot as usual, then acts at coordinates.
+
+"Could see" is decided by deterministic checks in the page: display, visibility and opacity of the element and its ancestors, overflow clipping, off-screen position, screen-reader-only clipping, zero font size, transparent text, and hit tests for anything covering it. The checks follow open shadow roots. An element below the fold counts as perceivable; the harness scrolls it into view before acting.
+
+Some outcomes on the tree path:
+
+- **Disabled control**: the action is `blocked` and the step fails with the harness's reason (for example `disabled. Verify that with a check, or do what enables it first`). Midscene does not click it at coordinates.
+- **The page re-rendered the element** between locate and act: the device rebinds once to the single element with the same role, name and container in a fresh snapshot (`receipt.rebound`). If there is no unique one, the receipt is `stale` and Midscene acts once at the located coordinates.
+- **Operations the harness has no guarded form of** (hover, double click, right click, key combinations other than single keys such as `Enter` or `Escape`) and elements its guard does not operate (date pickers, sliders): the element is still located from the tree, and the action runs at its coordinates.
+- **Elements inside iframes** count toward the match, but are never bound from the tree: the harness acts on the top-level document only, so these fall back to vision.
+
+The tree is read once per page state: the snapshot is reused until the page navigates, an action runs, or the document mutates.
+
+## Set up API keys for model
+
+<SetupEnv />
+
+The model is used for planning (`aiAct`), queries and assertions, and for locating whatever the tree cannot.
+
+## Connect to Chrome
+
+Start Chrome with remote debugging (for example `--remote-debugging-port=9222`), then connect and either open a new tab or attach to an existing one:
+
+```typescript title="./demo.ts"
+import 'dotenv/config';
+import { BrowserHarnessAgent } from '@midscene/web/browser-harness';
+
+const agent = await BrowserHarnessAgent.connect({
+  connect: { port: 9222 }, // or { wsUrl } / { profileDir }
+  url: 'https://example.com/login', // or targetId: '<existing tab id>'
+});
+
+await agent.aiTap('Log in'); // one button named "Log in": bound from the tree
+await agent.aiInput('Email', { value: 'qa@example.com' });
+await agent.aiAct('open the account menu and sign out'); // planned by the model
+await agent.destroy(); // closes the tab it opened and disconnects
+```
+
+`BrowserHarnessPage` is the device on its own, if you construct the agent yourself:
+
+```typescript
+import {
+  BrowserHarnessAgent,
+  BrowserHarnessPage,
+} from '@midscene/web/browser-harness';
+
+const page = await BrowserHarnessPage.connect({
+  connect: { wsUrl: 'ws://127.0.0.1:9222/devtools/browser/<id>' },
+  targetId: '<tab id>',
+  allowedOrigins: ['https://example.com', 'https://login.example.com'],
+});
+const agent = new BrowserHarnessAgent(page);
+```
+
+### Options
+
+- `allowedOrigins`: exact origins the harness may read and act on. Defaults to the origin of `url` or of the attached tab. On other origins the tree abstains (vision still works) and `Navigate` refuses.
+- `allowSensitiveFields`: lets guarded actions reach password, e-mail, name and other personal-data fields, which browser-harness-js refuses by default. Default `true`, because a test runner acts with the tester's authority.
+- `timeoutMs`: per-call timeout for harness reads and actions (default 30000).
+- `keyboardTypeDelay`, `inputStrategy`: as for the other web devices.
+
+## Addressing elements explicitly
+
+A plain-string prompt is tried as an exact accessible name. Pass `tree` to name the role or the container as well; the prompt remains the fallback for vision:
+
+```typescript
+await agent.aiTap('the Save button in the dialog', {
+  tree: { role: 'button', name: 'Save', exact: true, context: 'dialog: Edit profile' },
+});
+```
+
+Each locate task records what the tree did in `task.treeLocate` (hit, or abstained with the reason), and each action on a ref records the receipt in `task.receipt`, so the report shows which steps used the model.
