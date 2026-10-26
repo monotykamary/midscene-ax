@@ -18,6 +18,8 @@ once the upstream commit that carries it is vendored:
   device sets it only around its own guarded calls (allowSensitiveFields).
 - page.ts: cross-origin frames no longer count toward the frame limit (64).
 - page.ts: role locators resolve on large pages (maxChars 1,000,000).
+- page.ts: frames the guard cannot read (cross-origin, not committed) do not
+  make a role locator ambiguous.
 - page.ts: guarded refusals say why (disabled, hidden by ..., pointer-only,
   off-screen, covered by ..., not a control).
 
