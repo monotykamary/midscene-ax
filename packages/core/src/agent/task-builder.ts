@@ -37,6 +37,10 @@ import type { TaskCache } from './task-cache';
 import {
   RefActionBlockedError,
   TREE_HIT_SOURCE,
+  locateCacheWritable,
+  locateRungRuns,
+  locateSource,
+  receiptOutcome,
   refOperationForAction,
   resolveTreeLocate,
   treeQueryForLocate,
@@ -509,31 +513,24 @@ export class TaskBuilder {
       );
     }
     debug('actOnRef receipt', actionName, operation, match.ref, receipt);
-    switch (receipt.status) {
-      case 'executed':
-        task.receipt = receipt;
-        return undefined;
-      case 'stale':
-        task.receipt = receipt;
-        refAct.fallback = 'coordinates';
-        return callByCoordinates();
-      case 'blocked':
-        task.receipt = receipt;
-        throw new RefActionBlockedError(actionName, match.ref, receipt);
-      case 'outcome_unknown':
-        task.receipt = {
-          ...receipt,
-          verified: receipt.verified === true ? null : receipt.verified,
-        };
-        if (!task.planningFeedback) {
-          task.planningFeedback = `${actionName} on element ${match.ref} was sent, but its outcome is unknown${receipt.reason ? ` (${receipt.reason})` : ''}. Check the screen before relying on it.`;
-        }
-        return undefined;
-      default:
-        throw new Error(
-          `actOnRef returned an unknown receipt status for ${actionName}: ${JSON.stringify(receipt)}`,
-        );
+    const outcome = receiptOutcome(receipt);
+    if (!outcome) {
+      throw new Error(
+        `actOnRef returned an unknown receipt status for ${actionName}: ${JSON.stringify(receipt)}`,
+      );
     }
+    task.receipt = outcome.receipt;
+    if (outcome.path === 'throw') {
+      throw new RefActionBlockedError(actionName, match.ref, receipt);
+    }
+    if (outcome.path === 'coordinates') {
+      refAct.fallback = 'coordinates';
+      return callByCoordinates();
+    }
+    if (receipt.status === 'outcome_unknown' && !task.planningFeedback) {
+      task.planningFeedback = `${actionName} on element ${match.ref} was sent, but its outcome is unknown${receipt.reason ? ` (${receipt.reason})` : ''}. Check the screen before relying on it.`;
+    }
+    return undefined;
   }
 
   private rememberTreeMatch(match: TreeMatch): void {
@@ -673,7 +670,7 @@ export class TaskBuilder {
         // from xpath
         let rectFromXpath: Rect | undefined;
         if (
-          !isPlanDirectHit &&
+          locateRungRuns('xpath', { plan: isPlanDirectHit }) &&
           locateParam.xpath &&
           this.interface.rectMatchesCacheFeature
         ) {
@@ -710,7 +707,10 @@ export class TaskBuilder {
         let elementFromTree: LocateResultElement | undefined;
         let treeMatch: TreeMatch | undefined;
         const treeQuery =
-          !isPlanDirectHit && !isXpathHit && this.interface.locateInTree
+          locateRungRuns('tree', {
+            plan: isPlanDirectHit,
+            xpath: isXpathHit,
+          }) && this.interface.locateInTree
             ? treeQueryForLocate(locateParam)
             : undefined;
         if (treeQuery) {
@@ -756,18 +756,21 @@ export class TaskBuilder {
         const locateCacheRecord = this.taskCache?.matchLocateCache(cachePrompt);
         const cacheEntry = locateCacheRecord?.cacheContent?.cache;
 
-        const elementFromCacheResult =
-          isPlanDirectHit || isXpathHit || isTreeHit
-            ? null
-            : await matchElementFromCache(
-                {
-                  taskCache: this.taskCache,
-                  interfaceInstance: this.interface,
-                },
-                cacheEntry,
-                cachePrompt,
-                locateParam.cacheable,
-              );
+        const elementFromCacheResult = !locateRungRuns('cache', {
+          plan: isPlanDirectHit,
+          xpath: isXpathHit,
+          tree: isTreeHit,
+        })
+          ? null
+          : await matchElementFromCache(
+              {
+                taskCache: this.taskCache,
+                interfaceInstance: this.interface,
+              },
+              cacheEntry,
+              cachePrompt,
+              locateParam.cacheable,
+            );
 
         // elementFromCacheResult is in logical coordinates, which should be transformed to screenshot coordinates;
         const elementFromCache = elementFromCacheResult
@@ -781,7 +784,13 @@ export class TaskBuilder {
 
         let elementFromAiLocate: LocateResultElement | null | undefined;
         const timing = taskContext.task.timing;
-        if (!isXpathHit && !isTreeHit && !isCacheHit && !isPlanDirectHit) {
+        const hits = {
+          plan: isPlanDirectHit,
+          xpath: isXpathHit,
+          tree: isTreeHit,
+          cache: isCacheHit,
+        };
+        if (locateRungRuns('ai', hits)) {
           if (!locateParam.prompt && locateParam.tree) {
             // A tree-only address has nothing for AI locate to fall back on.
             throw new Error(
@@ -811,12 +820,14 @@ export class TaskBuilder {
           }
         }
 
-        const element =
-          elementFromPlan ||
-          elementFromXpath ||
-          elementFromTree ||
-          elementFromCache ||
-          elementFromAiLocate;
+        const source = locateSource(hits);
+        const element = {
+          plan: elementFromPlan,
+          xpath: elementFromXpath,
+          tree: elementFromTree,
+          cache: elementFromCache,
+          ai: elementFromAiLocate,
+        }[source];
 
         if (element) {
           const invalidElementReason = invalidLocateElementReason(element);
@@ -844,12 +855,14 @@ export class TaskBuilder {
         //    again on the next run, and a cached point must not stand in for
         //    the tree when it later abstains on an ambiguous or hidden target
         if (
-          element &&
           this.taskCache &&
-          !isCacheHit &&
-          !isTreeHit &&
-          (!isPlanDirectHit || !locateCacheAlreadyExists) &&
-          locateParam.cacheable !== false
+          locateCacheWritable({
+            found: !!element,
+            cacheEnabled: true,
+            source,
+            cacheExists: locateCacheAlreadyExists,
+            cacheable: locateParam.cacheable,
+          })
         ) {
           if (this.interface.cacheFeatureForPoint) {
             try {
