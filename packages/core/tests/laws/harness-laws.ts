@@ -47,19 +47,53 @@ const looseOne = ({ equal, other }: Env) =>
     .and(other.is('none'))
     .or(equal.is('none').and(other.is('one')));
 
+/** Several matches count (see exactlyOne). */
+const countMany = ({ exact, equal, other }: Env) =>
+  exact.and(equal.is('many')).or(
+    exact.not().and(
+      equal
+        .is('many')
+        .or(other.is('many'))
+        .or(equal.is('one').and(other.is('one'))),
+    ),
+  );
+/** Locating for an input, several matches count and exactly one of them takes typing. */
+const onlyEditable = (env: Env) =>
+  env.forInput.and(countMany(env)).and(env.editable.is('one'));
+
 const treeRungInputs = {
   errored: bool,
   exact: bool,
   equal: Count,
   other: Count,
   seen: Seen,
+  forInput: bool,
+  /** How many of the counted matches take typing. */
+  editable: Count,
 };
 
-/** The tree rung (resolveTreeLocate): exactly one perceivable match, or abstain. */
+/**
+ * The tree rung (resolveTreeLocate): exactly one perceivable match, or for an
+ * input the only editable one of several, or abstain.
+ */
 export const treeRungRule = fun('tree-rung')
   .inputs(treeRungInputs)
   .returns((env) => ({
-    hit: env.errored.not().and(exactlyOne(env)).and(env.seen.is('no').not()),
+    hit: env.errored
+      .not()
+      .and(exactlyOne(env).or(onlyEditable(env)))
+      .and(env.seen.is('no').not()),
+  }));
+/** Takes the editable one of several matches for any action. */
+export const treeRungAnyActionEditableRule = fun(
+  'tree-rung-any-action-editable',
+)
+  .inputs(treeRungInputs)
+  .returns((env) => ({
+    hit: env.errored
+      .not()
+      .and(exactlyOne(env).or(countMany(env).and(env.editable.is('one'))))
+      .and(env.seen.is('no').not()),
   }));
 /** Takes the first of several matches. */
 export const treeRungFirstMatchRule = fun('tree-rung-first-match')
@@ -71,25 +105,44 @@ export const treeRungFirstMatchRule = fun('tree-rung-first-match')
 export const treeRungNoRecheckRule = fun('tree-rung-no-recheck')
   .inputs(treeRungInputs)
   .returns((env) => ({
-    hit: env.errored.not().and(looseOne(env)).and(env.seen.is('no').not()),
+    hit: env.errored
+      .not()
+      .and(
+        looseOne(env).or(
+          onlyEditable({ ...env, exact: env.exact.and(env.exact.not()) }),
+        ),
+      )
+      .and(env.seen.is('no').not()),
   }));
 /** Ignores a hidden verdict. */
 export const treeRungBlindRule = fun('tree-rung-blind')
   .inputs(treeRungInputs)
-  .returns((env) => ({ hit: env.errored.not().and(exactlyOne(env)) }));
+  .returns((env) => ({
+    hit: env.errored.not().and(exactlyOne(env).or(onlyEditable(env))),
+  }));
 /** Keeps the matches it had when the interface threw. */
 export const treeRungIgnoreErrorRule = fun('tree-rung-ignore-error')
   .inputs(treeRungInputs)
   .returns((env) => ({
-    hit: exactlyOne(env).and(env.seen.is('no').not()),
+    hit: exactlyOne(env).or(onlyEditable(env)).and(env.seen.is('no').not()),
   }));
 
 export function treeRungLaws(rule: typeof treeRungRule) {
   return [
     rule.law(
-      'the tree rung hits only on exactly one match',
+      'the tree rung hits only on exactly one match, or for an input on the only editable one of several',
       (_env, out) => [out.hit],
-      (_out, env) => exactlyOne(env),
+      (_out, env) => exactlyOne(env).or(onlyEditable(env)),
+    ),
+    rule.law(
+      'only an input takes the editable one of several matches',
+      (env) => [env.forInput.not(), countMany(env)],
+      (out) => out.hit.not(),
+    ),
+    rule.law(
+      'several editable matches abstain even for an input',
+      (env) => [countMany(env), env.editable.is('many')],
+      (out) => out.hit.not(),
     ),
     rule.law(
       'an exact query counts only whole-name equal matches: core re-checks the name',

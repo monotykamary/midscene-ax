@@ -12,6 +12,8 @@ export interface HarnessRefEntry {
   sessionId: string;
   /** True for the top-level document; refs in child frames are prefixed. */
   mainFrame: boolean;
+  /** For a field: whether it takes typing now (not `[readonly]` or `[disabled]` in the snapshot). */
+  editable?: boolean;
 }
 
 // Document roots carry the page or frame title as their name; they are never
@@ -56,6 +58,25 @@ export function matchEntries(
 
 const LINE = /^( *)- (.*)$/;
 const REF = /\[ref=([^\]]+)\]/;
+
+const FIELD_ROLES = new Set(['textbox', 'searchbox', 'combobox', 'spinbutton']);
+
+/**
+ * Whether each field ref in a snapshot tree takes typing: a field role whose
+ * line carries neither `[readonly]` nor `[disabled]`. Other refs are absent.
+ */
+export function fieldEditability(tree: string): Map<string, boolean> {
+  const editable = new Map<string, boolean>();
+  for (const raw of tree.split('\n')) {
+    const line = LINE.exec(raw);
+    if (!line) continue;
+    const role = line[2].split(' ', 1)[0].toLowerCase();
+    const ref = REF.exec(line[2])?.[1];
+    if (!ref || !FIELD_ROLES.has(role)) continue;
+    editable.set(ref, !/\[(readonly|disabled)(=[^\]]*)?\]/.test(line[2]));
+  }
+  return editable;
+}
 
 /**
  * Parse a browser-harness-js snapshot tree into `UiNode`s. Lines look like

@@ -544,6 +544,53 @@ describe('harness contract: acting on refs', () => {
     param: { locate: { prompt: 'Log in' } },
   });
 
+  // A read-only demo box shares the login field's name.
+  const demoField: TreeMatch = {
+    ref: 'e3',
+    rect: { left: 10, top: 20, width: 40, height: 10 },
+    role: 'textbox',
+    name: 'Password',
+    revision: 'r1',
+    editable: false,
+  };
+  const loginField: TreeMatch = {
+    ...demoField,
+    ref: 'e7',
+    rect: { left: 10, top: 60, width: 40, height: 10 },
+    editable: true,
+  };
+
+  it('types into the only editable field among same-name matches', async () => {
+    const device = new HarnessInterface();
+    device.matches = [demoField, loginField];
+    const { run } = await runPlan(device, input(), {
+      type: 'Input',
+      thought: '',
+      param: { locate: { prompt: 'Password' }, value: 'secret' },
+    });
+    await run;
+    expect(device.actSpy).toHaveBeenCalledWith(
+      loginField,
+      'input',
+      'secret',
+      undefined,
+    );
+  });
+
+  it('still abstains on same-name fields for any action but Input', async () => {
+    const device = new HarnessInterface();
+    device.matches = [demoField, loginField];
+    const tapAction = tap();
+    const { run } = await runPlan(device, tapAction, {
+      type: 'Tap',
+      thought: '',
+      param: { locate: { prompt: 'Password' } },
+    });
+    await run;
+    expect(device.actSpy).not.toHaveBeenCalled();
+    expect(tapAction.call).toHaveBeenCalledTimes(1);
+  });
+
   it('acts on the ref when the receipt is executed', async () => {
     const device = new HarnessInterface();
     device.receipt = {

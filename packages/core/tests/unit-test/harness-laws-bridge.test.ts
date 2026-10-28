@@ -94,43 +94,70 @@ const match = (ref: string, name: string): TreeMatch => ({
   revision: 'r1',
 });
 
-describe('resolveTreeLocate() agrees with the tree rung rule on every state', () => {
+describe('resolveTreeLocate() agrees with the tree rung rule on every realisable state', () => {
   const seens = ['yes', 'no', 'unchecked'] as const;
+  const n = { none: 0, one: 1, many: 2 };
   for (const errored of bools)
     for (const exact of bools)
       for (const equal of counts)
         for (const other of counts)
-          for (const seen of seens) {
-            const state = { errored, exact, equal, other, seen };
-            it(JSON.stringify(state), async () => {
-              const n = { none: 0, one: 1, many: 2 };
-              const matches = [
-                ...Array.from({ length: n[equal] }, (_, i) =>
-                  match(`e${i}`, NAME),
-                ),
-                ...Array.from({ length: n[other] }, (_, i) =>
-                  match(`o${i}`, `${NAME} now`),
-                ),
-              ];
-              const device = new Device() as Device & Record<string, unknown>;
-              device.locateInTree = async () => {
-                if (errored) throw new Error('tree unavailable');
-                return matches;
-              };
-              if (seen !== 'unchecked')
-                device.perceivable = async (): Promise<Perceivability> => ({
-                  perceivable: seen === 'yes',
-                  ...(seen === 'no' ? { why: 'covered' } : {}),
+          for (const seen of seens)
+            for (const forInput of bools)
+              for (const editable of counts) {
+                // Editable matches are among the counted ones: an exact query counts only equal names.
+                const counted = exact ? n[equal] : n[equal] + n[other];
+                if (n[editable] > counted) continue;
+                const state = {
+                  errored,
+                  exact,
+                  equal,
+                  other,
+                  seen,
+                  forInput,
+                  editable,
+                };
+                it(JSON.stringify(state), async () => {
+                  const matches = [
+                    ...Array.from({ length: n[equal] }, (_, i) =>
+                      match(`e${i}`, NAME),
+                    ),
+                    ...Array.from({ length: n[other] }, (_, i) =>
+                      match(`o${i}`, `${NAME} now`),
+                    ),
+                  ];
+                  let left = n[editable];
+                  for (const m of matches) {
+                    const countedMatch = !exact || m.name === NAME;
+                    m.editable = countedMatch && left > 0;
+                    if (m.editable) left--;
+                  }
+                  const device = new Device() as Device &
+                    Record<string, unknown>;
+                  device.locateInTree = async () => {
+                    if (errored) throw new Error('tree unavailable');
+                    return matches;
+                  };
+                  if (seen !== 'unchecked')
+                    device.perceivable = async (): Promise<Perceivability> => ({
+                      perceivable: seen === 'yes',
+                      ...(seen === 'no' ? { why: 'covered' } : {}),
+                    });
+                  const query: TreeQuery = { name: NAME, exact };
+                  const outcome = await resolveTreeLocate(
+                    device,
+                    query,
+                    undefined,
+                    {
+                      forInput,
+                    },
+                  );
+                  expect(outcome.record.outcome === 'hit').toBe(
+                    run(treeRungRule, state).hit,
+                  );
+                  if (outcome.record.outcome === 'abstained')
+                    expect(outcome.record.reason).toBeTruthy();
                 });
-              const query: TreeQuery = { name: NAME, exact };
-              const outcome = await resolveTreeLocate(device, query);
-              expect(outcome.record.outcome === 'hit').toBe(
-                run(treeRungRule, state).hit,
-              );
-              if (outcome.record.outcome === 'abstained')
-                expect(outcome.record.reason).toBeTruthy();
-            });
-          }
+              }
 });
 
 it('treeQueryForLocate() agrees with the tree query rule on every state', () => {

@@ -225,6 +225,8 @@ export interface TreeMatch {
   revision?: string;
   /** Present when the interface checked perceivability while matching. */
   perceivable?: Perceivability;
+  /** For a field: whether a user can type into it now (not read-only or disabled). */
+  editable?: boolean;
 }
 
 /**
@@ -269,6 +271,8 @@ export interface TreeLocateRecord {
   query: TreeQuery;
   outcome: 'hit' | 'abstained';
   reason?: string;
+  /** Why a hit was chosen among several matches, e.g. the only editable one. */
+  note?: string;
   matchCount?: number;
   ref?: string;
   revision?: string;

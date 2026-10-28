@@ -38,6 +38,7 @@ import {
 } from './receipt';
 import {
   type HarnessRefEntry,
+  fieldEditability,
   matchEntries,
   normalizeName,
   parseSnapshotTree,
@@ -376,7 +377,9 @@ export class BrowserHarnessPage extends AbstractWebPage {
       );
     }
     const entries = new Map<string, HarnessRefEntry>();
+    const editability = fieldEditability(snapshot.tree);
     for (const [ref, info] of internals.refs) {
+      const editable = editability.get(ref);
       entries.set(ref, {
         ref,
         role: info.role,
@@ -386,6 +389,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
         frameId: info.frame.frameId,
         sessionId: info.frame.sessionId,
         mainFrame: ref.startsWith('s'),
+        ...(editable !== undefined ? { editable } : {}),
       });
     }
     const first = entries.keys().next().value;
@@ -572,6 +576,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
       perceivable: entry.mainFrame
         ? { perceivable: probe.ok, ...(probe.why ? { why: probe.why } : {}) }
         : { perceivable: false, why: FRAME_MATCH_REASON },
+      ...(entry.editable !== undefined ? { editable: entry.editable } : {}),
     };
   }
 

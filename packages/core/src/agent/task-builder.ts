@@ -274,6 +274,7 @@ export class TaskBuilder {
           (result) => {
             param[field] = result;
           },
+          planType,
         );
         context.tasks.push(locateTask);
       } else {
@@ -564,6 +565,8 @@ export class TaskBuilder {
     detailedLocateParam: DetailedLocateParam | string,
     context: PlanBuildContext,
     onResult?: (result: LocateResultElement) => void,
+    /** The action this locate serves, when it serves one (e.g. Input). */
+    forAction?: string,
   ): ExecutionTaskPlanningLocateApply {
     const { cacheable, locateModel, deepLocate } = context;
 
@@ -734,6 +737,7 @@ export class TaskBuilder {
             this.interface,
             treeQuery,
             abortSignal,
+            { forInput: forAction === 'Input' },
           );
           task.treeLocate = outcome.record;
           if (outcome.match) {
