@@ -125,6 +125,79 @@ export async function resolveTreeLocate(
   };
 }
 
+/** The rungs of the locate chain, in the order they are tried. */
+export const LOCATE_RUNGS = ['plan', 'xpath', 'tree', 'cache', 'ai'] as const;
+export type LocateRung = (typeof LOCATE_RUNGS)[number];
+/** Which rungs before AI hit, as far as the chain has run. */
+export type LocateHits = Partial<Record<Exclude<LocateRung, 'ai'>, boolean>>;
+
+/** A rung is tried only when every rung before it missed. */
+export function locateRungRuns(rung: LocateRung, hits: LocateHits): boolean {
+  for (const earlier of LOCATE_RUNGS) {
+    if (earlier === rung) return true;
+    if (earlier !== 'ai' && hits[earlier]) return false;
+  }
+  return false;
+}
+
+/** The rung whose element the chain uses: the first that hit, else AI. */
+export function locateSource(hits: LocateHits): LocateRung {
+  return LOCATE_RUNGS.find((rung) => rung !== 'ai' && hits[rung]) ?? 'ai';
+}
+
+/**
+ * Whether a located element is written to the locate cache. A cache hit is
+ * not written back, a tree hit never is (the tree resolves again on the next
+ * run, and a cached point must not stand in for it when it later abstains), a
+ * plan hit only when no cache entry exists yet, and never against
+ * `cacheable: false`.
+ */
+export function locateCacheWritable(input: {
+  found: boolean;
+  cacheEnabled: boolean;
+  source: LocateRung;
+  cacheExists: boolean;
+  cacheable?: boolean;
+}): boolean {
+  return (
+    input.found &&
+    input.cacheEnabled &&
+    input.source !== 'cache' &&
+    input.source !== 'tree' &&
+    (input.source !== 'plan' || !input.cacheExists) &&
+    input.cacheable !== false
+  );
+}
+
+/**
+ * What a ref action's receipt does to the action: `executed` is done and kept
+ * as returned (its diff included), `stale` falls back to the coordinate path,
+ * `blocked` throws with the receipt, and `outcome_unknown` is done without a
+ * verified success. Undefined for a status outside the contract.
+ */
+export function receiptOutcome(
+  receipt: ActReceipt,
+): { path: 'done' | 'coordinates' | 'throw'; receipt: ActReceipt } | undefined {
+  switch (receipt.status) {
+    case 'executed':
+      return { path: 'done', receipt };
+    case 'stale':
+      return { path: 'coordinates', receipt };
+    case 'blocked':
+      return { path: 'throw', receipt };
+    case 'outcome_unknown':
+      return {
+        path: 'done',
+        receipt: {
+          ...receipt,
+          verified: receipt.verified === true ? null : receipt.verified,
+        },
+      };
+    default:
+      return undefined;
+  }
+}
+
 export interface RefOperationPlan {
   operation: RefOperation;
   payload?: string;
