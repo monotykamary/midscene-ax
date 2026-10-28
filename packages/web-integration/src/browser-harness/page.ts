@@ -52,16 +52,14 @@ import type { SnapshotRef } from './vendor/bhjs/snapshot';
 const debug = getDebug('web:browser-harness');
 
 /**
- * browser-harness-js keeps the ref table, its invalidation epoch and its
- * refusal diagnosis private. The device reads them through this view instead
- * of patching the vendored SDK; the constructor checks they exist so an SDK
- * update that renames them fails loudly. (Upstream candidate: a public
- * `page.describeRef(ref)`.)
+ * browser-harness-js keeps the ref table and its invalidation epoch private.
+ * The device reads them through this view instead of patching the vendored
+ * SDK; the constructor checks they exist so an SDK update that renames them
+ * fails loudly. (Upstream candidate: a public `page.describeRef(ref)`.)
  */
 interface PageInternals {
   refs: Map<string, SnapshotRef>;
   epoch: number;
-  whyNotInteractable(ref: SnapshotRef, signal: AbortSignal): Promise<string>;
 }
 
 const internalsOf = (page: Page) => page as unknown as PageInternals;
@@ -72,33 +70,7 @@ const REF_PATTERN = /^(?:f\d+)?s[A-Za-z0-9_-]{12}_\d+e\d+$/;
 const RECENT_SNAPSHOTS = 3;
 const FRAME_MATCH_REASON =
   'inside a frame: browser-harness-js acts on the top-level document only';
-const NOT_OPERABLE = ': not an operable control';
-
-// The vendored guard keeps credential and personal-data fields out of its
-// observations unless FLOW_PILOT_ALLOW_SENSITIVE=1, read at each observation.
-// Devices that allow them set it only while their own guarded call runs.
-const SENSITIVE_ENV = 'FLOW_PILOT_ALLOW_SENSITIVE';
-let sensitiveHolders = 0;
-let sensitiveBefore: string | undefined;
-
-async function withSensitiveFields<T>(
-  allowed: boolean,
-  fn: () => Promise<T>,
-): Promise<T> {
-  if (!allowed) return fn();
-  if (sensitiveHolders++ === 0) {
-    sensitiveBefore = process.env[SENSITIVE_ENV];
-    process.env[SENSITIVE_ENV] = '1';
-  }
-  try {
-    return await fn();
-  } finally {
-    if (--sensitiveHolders === 0) {
-      if (sensitiveBefore === undefined) delete process.env[SENSITIVE_ENV];
-      else process.env[SENSITIVE_ENV] = sensitiveBefore;
-    }
-  }
-}
+const NOT_OPERABLE = 'not an operable control';
 
 export interface BrowserHarnessPageOptions extends TextInputOptions {
   /**
@@ -110,7 +82,9 @@ export interface BrowserHarnessPageOptions extends TextInputOptions {
   /**
    * Let guarded actions reach password, e-mail, name and other personal-data
    * fields, which browser-harness-js refuses by default. A test runner acts
-   * with the host's authority, so this defaults to true. Default: true.
+   * with the host's authority, so this defaults to true. Passed to the SDK's
+   * `allowSensitive` grant: `connect` creates the page with it; a page handed
+   * to the constructor keeps the grant it was created with. Default: true.
    */
   allowSensitiveFields?: boolean;
   /** Per-call timeout for harness reads and actions, 1..60000 ms. Default: 30000. */
@@ -185,11 +159,10 @@ export class BrowserHarnessPage extends AbstractWebPage {
     const internals = internalsOf(page);
     if (
       !(internals.refs instanceof Map) ||
-      typeof internals.epoch !== 'number' ||
-      typeof internals.whyNotInteractable !== 'function'
+      typeof internals.epoch !== 'number'
     ) {
       throw new Error(
-        'The vendored browser-harness-js Page no longer exposes refs, epoch and whyNotInteractable; update the BrowserHarnessPage adapter with the SDK',
+        'The vendored browser-harness-js Page no longer exposes refs and epoch; update the BrowserHarnessPage adapter with the SDK',
       );
     }
     this.page = page;
@@ -203,6 +176,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
     this.operability = new InteractionController(session, {
       allowedOrigins: this.allowedOrigins,
       input: 'trusted',
+      allowSensitive: this.allowSensitiveFields,
     });
   }
 
@@ -220,6 +194,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
     try {
       await browser.connect({ ...options.connect, autoAllow: false });
       const timeoutMs = options.timeoutMs ?? 30_000;
+      const allowSensitive = options.allowSensitiveFields ?? true;
       let allowedOrigins = options.allowedOrigins;
       let page: Page;
       if (options.targetId) {
@@ -234,6 +209,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
           allowedOrigins,
           input: 'trusted',
           timeoutMs,
+          allowSensitive,
         });
       } else {
         allowedOrigins ??= [new URL(options.url!).origin];
@@ -241,6 +217,7 @@ export class BrowserHarnessPage extends AbstractWebPage {
           allowedOrigins,
           input: 'trusted',
           timeoutMs,
+          allowSensitive,
         });
       }
       const device = new BrowserHarnessPage(
@@ -634,12 +611,12 @@ export class BrowserHarnessPage extends AbstractWebPage {
     if (call.method === 'scrollIntoView') return true;
     let observation: Awaited<ReturnType<InteractionController['observe']>>;
     try {
-      observation = await withSensitiveFields(this.allowSensitiveFields, () =>
-        this.operability.observe(
+      observation = await this.operability
+        .observe(
           { scope: this.page.scope, backendNodeId: entry.backendNodeId },
           { signal },
-        ),
-      ).finally(() => this.operability.invalidate(this.page.scope));
+        )
+        .finally(() => this.operability.invalidate(this.page.scope));
     } catch (error) {
       signal?.throwIfAborted();
       // The element or page changed under the probe; actOnRef revalidates
@@ -655,15 +632,11 @@ export class BrowserHarnessPage extends AbstractWebPage {
         (offered.length === 1 && offered[0] === 'scroll_into_view')
       );
     }
-    const internals = internalsOf(this.page);
-    const current = internals.refs.get(match.ref);
     // The ref was replaced by a later snapshot: actOnRef reports it stale.
-    if (!current) return true;
-    const why = await internals.whyNotInteractable(
-      current,
-      signal ?? new AbortController().signal,
-    );
-    return !why.startsWith(NOT_OPERABLE);
+    if (!internalsOf(this.page).refs.get(match.ref)) return true;
+    // The guard says why it offers nothing: only "not an operable control" is
+    // a limit of the harness; state refusals (disabled, covered) are blocked.
+    return !(observation.refusal ?? '').startsWith(NOT_OPERABLE);
   }
 
   private async perform(
@@ -673,20 +646,18 @@ export class BrowserHarnessPage extends AbstractWebPage {
   ): Promise<ActionResult> {
     const locator = this.page.locator(ref);
     const options = signal ? { signal } : {};
-    return withSensitiveFields(this.allowSensitiveFields, () => {
-      switch (call.method) {
-        case 'click':
-          return locator.click(options);
-        case 'fill':
-          return locator.fill(call.text, options);
-        case 'press':
-          return locator.press(call.key, options);
-        case 'selectOption':
-          return locator.selectOption(call.option, options);
-        case 'scrollIntoView':
-          return locator.scrollIntoView(options);
-      }
-    });
+    switch (call.method) {
+      case 'click':
+        return locator.click(options);
+      case 'fill':
+        return locator.fill(call.text, options);
+      case 'press':
+        return locator.press(call.key, options);
+      case 'selectOption':
+        return locator.selectOption(call.option, options);
+      case 'scrollIntoView':
+        return locator.scrollIntoView(options);
+    }
   }
 
   /**
