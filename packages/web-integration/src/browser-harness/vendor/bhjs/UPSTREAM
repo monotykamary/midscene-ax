@@ -1,27 +1,15 @@
 browser-harness-js SDK (skills/cdp/sdk), vendored because it is not published to npm.
 
 Upstream: https://github.com/monotykamary/browser-harness-js
-Commit:   0e1b2b6ebae16207446b741d18e65acc0ae8f227 (2026-10-17)
+Commit:   20fc83d8c79f087e982dc8deee4a7acb8abeae0e (2026-10-28)
 License:  MIT (LICENSE in this directory)
 
 Files: browser.ts chrome.ts extension-hub.ts generated.ts interaction.ts page.ts
        session.ts snapshot.ts wire.ts ws-server.ts
 Not vendored: recording.ts (the rrweb DOM tape), tests, gen.ts, repl.ts, the protocol JSON.
 
-Local patches, copied from flow-pilot's vendor/bhjs and being upstreamed to
-github.com/monotykamary/browser-harness-js in parallel. Drop each one here
-once the upstream commit that carries it is vendored:
-- interaction.ts: a transparent native checkbox, radio, file input or select
-  laid over its own drawn proxy is operable where the hit test lands on it.
-- interaction.ts: FLOW_PILOT_ALLOW_SENSITIVE=1 keeps credential and
-  personal-data fields operable (read when used, not at import). The Midscene
-  device sets it only around its own guarded calls (allowSensitiveFields).
-- page.ts: cross-origin frames no longer count toward the frame limit (64).
-- page.ts: role locators resolve on large pages (maxChars 1,000,000).
-- page.ts: frames the guard cannot read (cross-origin, not committed) do not
-  make a role locator ambiguous.
-- page.ts: guarded refusals say why (disabled, hidden by ..., pointer-only,
-  off-screen, covered by ..., not a control).
+No local patches: the guard patches this directory used to carry (transparent native controls, the sensitive-field
+grant, readable-frame limits, role locators on large pages, refusal reasons) are upstream since that commit.
 
-No other changes. Keep this directory out of the formatter and linter
-(biome.json files.ignore) so it stays byte-comparable with upstream.
+Keep this directory out of the formatter and linter (biome.json files.ignore) so it stays byte-comparable with
+upstream.

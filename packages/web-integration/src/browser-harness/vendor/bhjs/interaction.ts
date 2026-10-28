@@ -30,6 +30,11 @@ export type InteractionObservation = {
   title: string;
   truncated: boolean;
   truncation: { elements: boolean; scan: boolean; text: boolean };
+  /**
+   * Single-target observations only: why the requested target was not offered, and the
+   * next move. Diagnosis only; it never makes the target actionable.
+   */
+  refusal?: string;
 };
 export type InteractionAction = {
   targetId: string;
@@ -52,7 +57,19 @@ export type InteractionReceipt = {
  * pointer or key events require, and enables `press` and contenteditable typing.
  */
 export type InteractionInput = 'synthetic' | 'trusted';
-export type InteractionOptions = { allowedOrigins: string[]; input?: InteractionInput };
+export type InteractionOptions = {
+  allowedOrigins: string[];
+  input?: InteractionInput;
+  /**
+   * Host grant for credential and personal-data fields (passwords, e-mail, phone, names,
+   * card numbers, `data-private` / `data-sensitive` markers). Excluded by default. A test
+   * runner acting on the application under test with the host's authority sets it so those
+   * fields are offered, typed into and read back like any other control; redacting the
+   * evidence it keeps then becomes the host's job. When omitted, `BH_ALLOW_SENSITIVE=1` in
+   * the host process grants it, read at each observation.
+   */
+  allowSensitive?: boolean;
+};
 
 type Options = { signal?: AbortSignal };
 type RecordState = {
@@ -109,6 +126,7 @@ export class InteractionController {
   private readonly session: InteractionSession;
   private readonly origins: string[];
   private readonly input: InteractionInput;
+  private readonly allowSensitive?: boolean;
   private readonly records = new Map<string, RecordState>();
   private readonly epochs = new Map<string, symbol>();
   private readonly queues: Map<string, ScopeQueue>;
@@ -133,6 +151,10 @@ export class InteractionController {
     const input = options.input ?? 'synthetic';
     if (input !== 'synthetic' && input !== 'trusted') throw new Error("input must be 'synthetic' or 'trusted'");
     this.input = input;
+    if (options.allowSensitive !== undefined && typeof options.allowSensitive !== 'boolean') {
+      throw new Error('allowSensitive must be a boolean');
+    }
+    this.allowSensitive = options.allowSensitive;
     this.session = session;
     this.queues = scopeQueues.get(session) ?? new Map();
     scopeQueues.set(session, this.queues);
@@ -382,6 +404,11 @@ export class InteractionController {
     return abortable(next, signal);
   }
 
+  /** An explicit option wins; otherwise the host's environment, read now rather than at construction. */
+  private sensitiveGranted(): boolean {
+    return this.allowSensitive ?? process.env.BH_ALLOW_SENSITIVE === '1';
+  }
+
   private allowed(url: string): boolean {
     try {
       return this.origins.includes(new URL(url).origin);
@@ -475,15 +502,16 @@ export class InteractionController {
         targetObject = resolved.object?.objectId;
         if (!targetObject) throw new Error('Target unavailable');
       }
+      const sensitive = this.sensitiveGranted();
       const evaluated = targetObject
         ? await this.call(sid, 'Runtime.callFunctionOn', {
           objectId: targetObject,
-          functionDeclaration: `function(origins, max, trusted) { return (${projectionFor()})(origins, max, trusted, this); }`,
-          arguments: [{ value: this.origins }, { value: max }, { value: this.input === 'trusted' }],
+          functionDeclaration: `function(origins, max, trusted, sensitive) { return (${projection})(origins, max, trusted, sensitive, this); }`,
+          arguments: [{ value: this.origins }, { value: max }, { value: this.input === 'trusted' }, { value: sensitive }],
           objectGroup: 'browser-harness-guard', awaitPromise: true,
         }, generation, signal)
         : await this.call(sid, 'Runtime.evaluate', {
-          expression: `(${projectionFor()})(${JSON.stringify(this.origins)}, ${max}, ${this.input === 'trusted'})`,
+          expression: `(${projection})(${JSON.stringify(this.origins)}, ${max}, ${this.input === 'trusted'}, ${sensitive})`,
           contextId: world.executionContextId, objectGroup: 'browser-harness-guard', awaitPromise: true,
         }, generation, signal);
       objectId = evaluated.result?.objectId;
@@ -515,6 +543,7 @@ export class InteractionController {
         truncated: data.truncated,
         truncation: data.truncation,
       };
+      if (typeof data.refusal === 'string') observation.refusal = data.refusal;
       this.records.set(sid, {
         objectId,
         epoch,
@@ -581,8 +610,8 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 // Runs in a CDP isolated world: page-defined prototypes cannot replace these guards.
 // Bounded controls from the document and its open shadow roots, with an explicit role
 // allowlist, plus scrollable regions. Not a complete accessibility tree; trusted input
-// is opt-in and dispatched by the host.
-const projectionSource = String.raw`async function(allowedOrigins, maxElements, trustedInput, target) {
+// and sensitive fields are opt-in host grants.
+const projection = String.raw`async function(allowedOrigins, maxElements, trustedInput, allowSensitive, target) {
   const doc = document;
   const url = location.href;
   if (!allowedOrigins.includes(location.origin)) return { snapshot: { denied: true } };
@@ -597,7 +626,10 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   const TEXT_ROLES = ['textbox', 'searchbox', 'combobox'];
   const CHECKED_ROLES = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
   const SELECTED_ROLES = ['option', 'tab', 'treeitem'];
-  const TEXT_INPUT_TYPES = ['text', 'search', 'url', 'number'];
+  // Password, e-mail and phone inputs are text fields too, offered only under the host's sensitive grant.
+  const TEXT_INPUT_TYPES = allowSensitive
+    ? ['text', 'search', 'url', 'number', 'password', 'email', 'tel']
+    : ['text', 'search', 'url', 'number'];
   const IDENTITY_ATTRIBUTES = ['id', 'name', 'type', 'href', 'role', 'for', 'form', 'action'];
   const BUTTON_INPUT_TYPES = ['button', 'submit', 'reset', 'checkbox', 'radio'];
   const GROUP_ROLES = ['dialog', 'alertdialog', 'grid', 'group', 'listbox', 'menu', 'menubar', 'tablist',
@@ -669,7 +701,9 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   };
 
   const sensitiveName = /pass(?:word|code|phrase)?|secret|token|api[\s_-]*key|auth|credential|security|user[\s_-]*name|login|full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|surname|otp|one[\s_-]*time|mfa|2fa|\bpin\b|ssn|social[\s_-]*security|credit|card|cvv|cvc|iban|routing|account|bank|birth|\bdob\b|e[\s_-]*mail|phone|\btel\b|mobile|address|postal|zip/i;
+  // Without the host's grant, credential and personal-data fields are never offered.
   const secure = el => {
+    if (allowSensitive) return false;
     if (el.type === 'password' || el.hasAttribute('data-private') || el.hasAttribute('data-sensitive')) return true;
     const autocomplete = el.getAttribute('autocomplete') || '';
     if (tooLong(autocomplete, LIMITS.text)) return true;
@@ -688,6 +722,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     }
     return false;
   };
+  const privateMarked = el => !allowSensitive && !!closestComposed(el, '[data-private], [data-sensitive]');
 
   // Native semantics: the implicit role and how the element is operated.
   const native = el => {
@@ -789,7 +824,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   };
 
   const semantics = el => {
-    if (!(el instanceof HTMLElement) || secure(el) || closestComposed(el, '[data-private], [data-sensitive]')) return null;
+    if (!(el instanceof HTMLElement) || secure(el) || privateMarked(el)) return null;
     const described = roleOf(el);
     if (!described) return null;
     const { role, kind } = described;
@@ -857,11 +892,12 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
       element.hidden || element.inert || element.getAttribute('aria-hidden') === 'true';
   };
 
-  // flow-pilot patch: a native checkbox, radio, file input or select made transparent and laid over its own styled
-  // proxy (a drawn ring or box with pointer-events:none) is what a user's click reaches. Only its own opacity may
-  // hide it; any other hidden reason, or a hidden ancestor, still does, and the hit test below must land on it.
-  const transparentProxy = el => {
-    const native = (el.tagName === 'INPUT' && ['checkbox', 'radio', 'file'].includes(el.type)) || el.tagName === 'SELECT';
+  // A native checkbox, radio or select made fully transparent and laid over its own drawn
+  // proxy (a styled ring or box with pointer-events:none) is what a user's click reaches.
+  // Only its own opacity is excused: any other hidden reason, or a hidden ancestor, still
+  // hides it, and the hit test must still land on it. Other transparent controls stay hidden.
+  const transparentNative = el => {
+    const native = (el.tagName === 'INPUT' && ['checkbox', 'radio'].includes(el.type)) || el.tagName === 'SELECT';
     if (!native) return false;
     const style = getComputedStyle(el);
     return Number(style.opacity) === 0 && style.display !== 'none' && style.visibility === 'visible' &&
@@ -874,7 +910,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     const rect = el.getBoundingClientRect();
     let rendered = rect.width > 0 && rect.height > 0;
     for (let parent = el; parent; parent = composedParent(parent)) {
-      if (isHidden(parent) && !(parent === el && transparentProxy(el))) rendered = false;
+      if (isHidden(parent) && !(parent === el && transparentNative(el))) rendered = false;
     }
     const visible = rendered && rect.x + rect.width > 0 && rect.y + rect.height > 0 &&
       rect.x < innerWidth && rect.y < innerHeight;
@@ -960,7 +996,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     if (referenced === null) return null;
     const name = (referenced || el.getAttribute('aria-label') || '').trim();
     if (!name && !SCROLL_ROLES.includes(role)) return null;
-    if (tooLong(name, LIMITS.text) || closestComposed(el, '[data-private], [data-sensitive]')) return null;
+    if (tooLong(name, LIMITS.text) || privateMarked(el)) return null;
     const rect = el.getBoundingClientRect();
     const x = rect.x + rect.width / 2;
     const y = rect.y + rect.height / 2;
@@ -1024,6 +1060,58 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   }
   if (page && page.semantic.operations.length) refs.push({ element: scroller, kind: 'page', initial: page });
   const truncation = { elements: elementsTruncated, scan: scanned === LIMITS.scan, text: textTruncated };
+
+  // Why a requested target is not offered, and the next move. Diagnosis only: it re-reads the
+  // predicates above, after truncation is settled, and never makes anything actionable.
+  const describe = node => {
+    const id = node.getAttribute && node.getAttribute('id');
+    const text = privateMarked(node) ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    return String(node.tagName || 'node').toLowerCase() + (id ? '#' + id.slice(0, 64) : '') + (text ? ' ' + JSON.stringify(text) : '');
+  };
+  const explain = el => {
+    if (!el || typeof el.matches !== 'function' || typeof el.getBoundingClientRect !== 'function') {
+      return 'not an operable control; act on the control itself (by role, label or ref)';
+    }
+    const element = el instanceof HTMLElement;
+    if (element && (secure(el) || privateMarked(el))) {
+      return 'sensitive: its name, autocomplete or markers look like credential or personal data, which the guard ' +
+        "operates only under the host's allowSensitive grant";
+    }
+    if (el.matches(':disabled') || closestComposed(el, '[aria-disabled="true"]')) {
+      return 'disabled; check that this is the expected state, or do what enables it first';
+    }
+    let ariaHidden = null;
+    for (let node = el; node; node = composedParent(node)) {
+      const style = getComputedStyle(node);
+      const hidden = style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0 || node.hidden || node.inert;
+      if (hidden && !(node === el && transparentNative(el))) {
+        return 'hidden (' + (node === el ? 'itself' : 'by ancestor ' + describe(node)) + '); open or reveal what contains it first';
+      }
+      if (!ariaHidden && node.getAttribute('aria-hidden') === 'true') ariaHidden = node;
+    }
+    const rect = el.getBoundingClientRect();
+    const x = rect.x + rect.width / 2;
+    const y = rect.y + rect.height / 2;
+    const sized = rect.width > 0 && rect.height > 0;
+    if (ariaHidden && sized) {
+      return 'pointer-only: visible, but hidden from the accessibility tree (aria-hidden on ' +
+        (ariaHidden === el ? 'itself' : describe(ariaHidden)) + '), so the guard cannot act on it; a user would click it at ' +
+        '{x:' + Math.round(x) + ',y:' + Math.round(y) + '}, which only an authorized coordinate click can do';
+    }
+    if (!sized) return 'it has no size on the page';
+    if (rect.x + rect.width <= 0 || rect.y + rect.height <= 0 || rect.x >= innerWidth || rect.y >= innerHeight) {
+      return 'outside the viewport; scroll it into view, then retry';
+    }
+    const hit = deepHit(x, y);
+    if (hit && hit !== el && !composedContains(el, hit) && !composedContains(hit, el)) {
+      return 'covered at its centre by ' + describe(hit) + '; close or move what covers it, then retry';
+    }
+    const semantic = element ? semantics(el) : null;
+    if (semantic && !semantic.operations.length) return 'read-only; it offers no operation';
+    const role = (el.getAttribute('role') || '').trim().split(/\s+/)[0];
+    return 'not an operable control (' + String(el.tagName || 'node').toLowerCase() + (role ? ' role=' + role.slice(0, 32) : '') +
+      '); act on the control itself (by role, label or ref)';
+  };
   // Only SHA-256 digests cross CDP (at most 128 * 64 characters); raw attributes stay in-page.
   // Fail closed when SubtleCrypto is unavailable (e.g. an insecure non-local HTTP context).
   const revisionState = await Promise.all(refs.map(async ref => {
@@ -1038,6 +1126,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     truncated: Object.values(truncation).some(Boolean),
     truncation,
   };
+  if (target && !refs.length) snapshot.refusal = bounded(explain(target), LIMITS.text);
 
   const setValue = (element, text) => {
     const proto = element.tagName === 'TEXTAREA' ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype;
@@ -1109,15 +1198,3 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     return { status: 'executed', reason: 'dispatched_not_verified' };
   } };
 }`;
-/**
- * flow-pilot patch: a test runner acts on the application under test with the
- * host's authority, so credential and personal-data fields must be operable.
- * FLOW_PILOT_ALLOW_SENSITIVE=1 keeps them in observations; evidence redaction
- * stays the runner's job. Unset, the upstream guard behaviour is unchanged.
- */
-const sensitiveProjection = projectionSource
-  .replace('const secure = el => {', 'const secure = el => { return false;')
-  .replace("const TEXT_INPUT_TYPES = ['text', 'search', 'url', 'number'];", "const TEXT_INPUT_TYPES = ['text', 'search', 'url', 'number', 'password', 'email', 'tel'];");
-// Read when used, not at import, so every harness in the process (agent server or replay) sees the host's grant.
-const projectionFor = () => (process.env.FLOW_PILOT_ALLOW_SENSITIVE === '1' ? sensitiveProjection : projectionSource);
-

@@ -53,11 +53,16 @@ export function nodeIdentity(node: AXNode): string {
     node.description?.value, ...['checked', 'selected', 'expanded', 'disabled', 'readonly', 'required'].map(k => p[k])])).digest('hex');
 }
 
+export const MISSING_SUBTREE = 'Snapshot subtree is missing or ambiguous';
+
+/** The largest `maxChars` a snapshot accepts. */
+export const MAX_SNAPSHOT_CHARS = 1_000_000;
+
 export function snapshotLimits(options: SnapshotOptions): { maxDepth: number; maxChars: number } {
   const maxDepth = options.maxDepth ?? 50;
   const maxChars = options.maxChars ?? 50_000;
   if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 100) throw new Error('maxDepth must be 0..100');
-  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 1_000_000) throw new Error('maxChars must be 1..1000000');
+  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > MAX_SNAPSHOT_CHARS) throw new Error(`maxChars must be 1..${MAX_SNAPSHOT_CHARS}`);
   if (options.ref !== undefined && options.selector !== undefined) throw new Error('Choose ref or selector, not both');
   return { maxDepth, maxChars };
 }
@@ -76,7 +81,7 @@ export function renderAX(
   const roots = rootBackendId === undefined
     ? [...byId.values()].filter(n => !childIds.has(n.nodeId))
     : [...byId.values()].filter(n => n.backendDOMNodeId === rootBackendId);
-  if (rootBackendId !== undefined && roots.length !== 1) throw new Error('Snapshot subtree is missing or ambiguous');
+  if (rootBackendId !== undefined && roots.length !== 1) throw new Error(MISSING_SUBTREE);
   if (nodes.length && !roots.length) throw new Error('AX tree has no root');
   type View = { node: AXNode; role: string; name: string; children: View[]; text?: string; sensitive: boolean };
   const visited = new Set<string>();

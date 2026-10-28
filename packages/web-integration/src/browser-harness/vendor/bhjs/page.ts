@@ -1,11 +1,15 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { Session } from './session.ts';
 import { InteractionController, type InteractionAction, type InteractionObservation, type InteractionReceipt, type InteractionInput } from './interaction.ts';
-import { renderAX, snapshotDiff, snapshotLimits, nodeIdentity, roleOf, nameOf, SnapshotLimitError,
+import { renderAX, snapshotDiff, snapshotLimits, nodeIdentity, roleOf, nameOf, SnapshotLimitError, MAX_SNAPSHOT_CHARS, MISSING_SUBTREE,
   type AXNode, type SnapshotOptions, type SnapshotFrame, type SnapshotRef, type PageSnapshot } from './snapshot.ts';
 export type { PageSnapshot, SnapshotOptions } from './snapshot.ts';
 
-export type PageOptions = { sessionId: string; targetId?: string; allowedOrigins: string[]; input?: InteractionInput; timeoutMs?: number; ownsAttachment?: boolean };
+export type PageOptions = {
+  sessionId: string; targetId?: string; allowedOrigins: string[]; input?: InteractionInput; timeoutMs?: number; ownsAttachment?: boolean;
+  /** Host grant for credential and personal-data fields; see InteractionOptions.allowSensitive. */
+  allowSensitive?: boolean;
+};
 export type CallOptions = { signal?: AbortSignal; timeoutMs?: number };
 export type ActionOptions = CallOptions & { verify?: (snapshot: PageSnapshot) => boolean };
 export type ActionResult = InteractionReceipt & {
@@ -21,7 +25,12 @@ type Query = { kind: 'ref'; ref: string; epoch: number } | { kind: 'css'; select
 type Frame = SnapshotFrame & { parentId?: string };
 const invalidations = new Set(['Page.frameNavigated', 'Page.navigatedWithinDocument', 'Page.frameDetached',
   'Runtime.executionContextsCleared', 'DOM.documentUpdated', 'Inspector.detached', 'Inspector.targetCrashed']);
+const MAX_FRAMES = 64;
+const UNREADABLE_FRAME = /^frame \S+: (?:origin_denied|not committed)$/;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+/** The blocked reason when the guard offers no candidate: a stable code, then why and the next move. */
+const refusal = (seen: InteractionObservation) => 'not_interactable_or_unsupported' +
+  (seen.truncated ? ': observation truncated' : seen.refusal ? `: ${seen.refusal}` : '');
 const frameKey = (frame: any) => JSON.stringify([frame.id, frame.loaderId, frame.url]);
 
 /** Scope-bound page. No method reads or changes Session's mutable active-target pointer. */
@@ -51,7 +60,7 @@ export class Page {
 
   constructor(session: Session, options: PageOptions) {
     if (!options?.sessionId || options.sessionId.length > 256) throw new Error('Page requires an explicit sessionId');
-    this.guard = new InteractionController(session, { allowedOrigins: options.allowedOrigins, input: options.input ?? 'trusted' });
+    this.guard = new InteractionController(session, { allowedOrigins: options.allowedOrigins, input: options.input ?? 'trusted', allowSensitive: options.allowSensitive });
     this.timeoutMs = options.timeoutMs ?? 10_000;
     if (!Number.isInteger(this.timeoutMs) || this.timeoutMs < 1 || this.timeoutMs > 60_000) {
       this.guard.close(); throw new Error('timeoutMs must be 1..60000');
@@ -147,10 +156,11 @@ export class Page {
       const f = entry.frame;
       if (visited.has(f.id)) return;
       visited.add(f.id);
-      // flow-pilot patch: cross-origin frames (ads, trackers) are omitted, so only readable frames count toward the limit.
+      // Denied frames (cross-origin ads, trackers) are only listed as omissions and never read,
+      // so only readable frames count toward the limit.
       if (!this.allowed(f)) { omissions.push(`frame ${f.id}: origin_denied`); return; }
-      if (frames.length >= 64) throw new SnapshotLimitError('Frame count exceeds 64');
       if (!f.loaderId) { omissions.push(`frame ${f.id}: not committed`); return; }
+      if (frames.length >= MAX_FRAMES) throw new SnapshotLimitError(`Frame count exceeds ${MAX_FRAMES}`);
       frames.push({ frameId: f.id, sessionId: this.childSessions.get(f.id) ?? sid, key: frameKey(f), url: f.url, parentId: f.parentId });
       for (const child of entry.childFrames ?? []) visit(child, sid);
     };
@@ -248,6 +258,10 @@ export class Page {
     return this.run(signal => this.snapshotInternal(copy, signal), copy);
   }
   private async snapshotInternal(options: SnapshotOptions, signal: AbortSignal): Promise<PageSnapshot> {
+    return (await this.read(options, signal)).snapshot;
+  }
+  /** A snapshot plus whether its rendered tree itself was cut (maxDepth), apart from omitted frames. */
+  private async read(options: SnapshotOptions, signal: AbortSignal): Promise<{ snapshot: PageSnapshot; renderTruncated: boolean }> {
     const limits = snapshotLimits(options);
     const selected = options.ref !== undefined ? this.refs.get(options.ref) : undefined;
     if (options.ref !== undefined && !selected) throw new Error('stale_ref: take a new snapshot');
@@ -303,7 +317,7 @@ export class Page {
     const result: PageSnapshot = { id: randomUUID(), url: main.url, title, tree,
       diff: snapshotDiff(previous?.tree, tree, keys, previous?.keys ?? new Map()), truncated: truncated || omissions.length > 0, omissions };
     this.refs = refs; this.previous = { tree, keys, scope };
-    return result;
+    return { snapshot: result, renderTruncated: truncated };
   }
 
   locator(selectorOrRef: string): Locator {
@@ -328,7 +342,10 @@ export class Page {
       return ref;
     }
     if (query.kind === 'css') {
-      await this.snapshotInternal({ selector: query.selector, frameId: query.frameId }, signal);
+      // An element outside the accessibility tree has no subtree to read; it is diagnosed below.
+      let unread: unknown;
+      await this.snapshotInternal({ selector: query.selector, frameId: query.frameId }, signal)
+        .catch(error => { if (message(error) !== MISSING_SUBTREE) throw error; unread = error; });
       // The scoped tree's root may be an ignored wrapper; resolve the CSS identity
       // again rather than choosing an arbitrary descendant control.
       const { frames } = await this.framesInternal(signal);
@@ -337,16 +354,23 @@ export class Page {
       const backendNodeId = await this.selectorNode(query.selector, frame, signal);
       const nodes = await this.frameNodes(frame, signal);
       const node = nodes.find(n => n.backendDOMNodeId === backendNodeId && !n.ignored);
-      if (!node) throw new Error('No accessible target for selector');
+      if (!node) {
+        // Outside the accessibility tree (aria-hidden, presentational): let the guard say why.
+        const why = frame.frameId === frames[0]!.frameId
+          ? await this.guard.observe({ scope: this.scope, backendNodeId }, { signal }).then(seen => seen.refusal, () => undefined)
+          : undefined;
+        throw new Error(why ? `No accessible target for selector: ${why}` : 'No accessible target for selector');
+      }
+      if (unread) throw unread;
       return { frame, backendNodeId, identity: nodeIdentity(node), role: roleOf(node), name: nameOf(node) };
     }
-    // flow-pilot patch: resolve role locators on large pages too (the documented maximum, not the 50k default).
-    const snapshot = await this.snapshotInternal({ frameId: query.frameId, maxChars: 1_000_000 }, signal);
-    // flow-pilot patch: frames the guard cannot read or act in (cross-origin ads and trackers, frames not yet
-    // committed) do not make a match ambiguous; uniqueness is judged over the content that can be acted on.
-    const unreadableOnly = snapshot.omissions.every(o => /: (origin_denied|not committed)$/.test(o));
-    const renderTruncated = snapshot.tree.includes('[snapshot truncated');
-    if (snapshot.truncated && (renderTruncated || !unreadableOnly)) throw new Error('Strict locator requires a complete snapshot; narrow the frame or use a selector');
+    // Role matching needs the complete scope, not a readable digest: read up to the
+    // documented maximum so large pages resolve instead of failing at the 50,000 default.
+    const { snapshot, renderTruncated } = await this.read({ frameId: query.frameId, maxChars: MAX_SNAPSHOT_CHARS }, signal);
+    // Frames nothing can read or act in (denied cross-origin ads and trackers, frames not yet
+    // committed) cannot hold a match, so uniqueness is judged over the readable content. A cut
+    // render or any other omission (an unreadable allowed frame) still makes the scope incomplete.
+    if (renderTruncated || snapshot.omissions.some(omission => !UNREADABLE_FRAME.test(omission))) throw new Error('Strict locator requires a complete snapshot; narrow the frame or use a selector');
     const matches = [...this.refs.values()].filter(ref => ref.role === query.role &&
       (query.options.name === undefined || (query.options.exact === false ? ref.name.includes(query.options.name) : ref.name === query.options.name)) &&
       (query.options.context === undefined || ref.context === query.options.context));
@@ -361,35 +385,6 @@ export class Page {
     const result = await this.call('Accessibility.getPartialAXTree', { backendNodeId: ref.backendNodeId, fetchRelatives: false }, signal, ref.frame.sessionId);
     const node = (result.nodes as AXNode[]).find(n => n.backendDOMNodeId === ref.backendNodeId && !n.ignored);
     if (!node || nodeIdentity(node) !== ref.identity) throw new Error('stale_ref: target changed');
-  }
-
-  /**
-   * flow-pilot patch: why the guard offered no candidate for a resolved target, so any model gets the reason and the
-   * next move instead of a bare refusal. Diagnosis only: it never changes what may be acted on.
-   */
-  private async whyNotInteractable(ref: SnapshotRef, signal: AbortSignal): Promise<string> {
-    try {
-      const { object } = await this.call('DOM.resolveNode', { backendNodeId: ref.backendNodeId }, signal, ref.frame.sessionId);
-      const { result } = await this.call('Runtime.callFunctionOn', { objectId: object.objectId, returnByValue: true, functionDeclaration: `function () {
-        const el = this, name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (e.textContent ? ' ' + JSON.stringify(e.textContent.trim().slice(0, 40)) : '');
-        if (el.matches(':disabled') || el.closest('[aria-disabled="true"]')) return ': disabled. Verify that with a check, or do what enables it first';
-        let treeHidden = null;
-        for (let e = el; e; e = e.parentElement || (e.getRootNode() && e.getRootNode().host)) {
-          const cs = getComputedStyle(e);
-          if (cs.display === 'none' || cs.visibility !== 'visible' || Number(cs.opacity) === 0 || e.hidden || e.inert)
-            return ': hidden (' + (e === el ? 'itself' : 'by ancestor ' + name(e)) + '). Open or reveal what contains it first';
-          if (!treeHidden && e.getAttribute('aria-hidden') === 'true') treeHidden = e;
-        }
-        const r = el.getBoundingClientRect();
-        if (treeHidden && r.width && r.height) return ': pointer-only: visible, but hidden from the accessibility tree (aria-hidden on ' + (treeHidden === el ? 'itself' : name(treeHidden)) + '). Click it where a user would: tools.clickAt({x:' + Math.round(r.x + r.width / 2) + ',y:' + Math.round(r.y + r.height / 2) + '})';
-        if (!r.width || !r.height) return ': it has no size on the page';
-        if (r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return ': outside the viewport. Scroll it into view (tools.scrollTo), then retry';
-        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
-        if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) return ': covered at its centre by ' + name(hit) + '. Close or move what covers it, then retry';
-        return ': not an operable control (' + el.tagName.toLowerCase() + '). Act on the control itself (role/label/ref), or use tools.clickText for clickable text';
-      }` }, signal, ref.frame.sessionId);
-      return typeof result?.value === 'string' ? result.value : '';
-    } catch { return ''; }
   }
 
   /** Internal Locator entry point; selection never dispatches raw input. */
@@ -409,15 +404,16 @@ export class Page {
       const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId }, { signal });
       let seen = await observe();
       let candidate = seen.candidates[0];
-      if (!candidate || seen.truncated) return { status: 'blocked', reason: 'not_interactable_or_unsupported' + (seen.truncated ? ': observation truncated' : await this.whyNotInteractable(ref, signal)), verified: null };
+      if (!candidate || seen.truncated) return { status: 'blocked', reason: refusal(seen), verified: null };
       if (operation !== 'scroll_into_view' && candidate.operations.length === 1 && candidate.operations[0] === 'scroll_into_view') {
         attempted = true;
         const scroll = await this.guard.act({ scope: this.scope, observationId: seen.observationId, action: { targetId: candidate.id, operation: 'scroll_into_view' } }, { signal });
         if (scroll.status !== 'executed') return { ...scroll, verified: null };
         await this.currentTarget(ref, signal);
         seen = await observe(); candidate = seen.candidates[0];
+        if (!candidate) return { status: 'blocked', reason: refusal(seen), verified: null };
       }
-      if (!candidate || !candidate.operations.includes(operation)) return { status: 'blocked', reason: 'unsupported_action', verified: null };
+      if (!candidate.operations.includes(operation)) return { status: 'blocked', reason: 'unsupported_action', verified: null };
       const action: InteractionAction = { targetId: candidate.id, operation };
       let expected: string | undefined;
       if (operation === 'type') { action.text = String(payload); expected = action.text; }
