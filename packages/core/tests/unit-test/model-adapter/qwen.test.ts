@@ -361,7 +361,7 @@ describe('qwen model adapter', () => {
     );
     expect(result).toEqual({
       center: [201, 300.875],
-      rect: { left: 100.25, top: 200.5, width: 202.5, height: 201.75 },
+      rect: { left: 100.25, top: 200.5, width: 201.5, height: 200.75 },
     });
   });
 
@@ -409,6 +409,31 @@ describe('qwen model adapter', () => {
           },
         ).rect,
     ).toThrow(/exceed image size/);
+  });
+});
+
+describe('Qwen 2.5 edge coordinates', () => {
+  it('accepts a pixel box ending on the image edge', () => {
+    const locate = qwen25Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(
+      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], {
+        preparedSize: { width: 100, height: 80 },
+      }),
+    ).toEqual({
+      center: [80, 60],
+      rect: { left: 60, top: 40, width: 40, height: 40 },
+    });
+  });
+
+  it('accepts a point on the image edge and clamps it inside', () => {
+    const locate = qwen25Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(
+      locate.element.resultCodec.toPixelResult([100, 80], {
+        preparedSize: { width: 100, height: 80 },
+      }),
+    ).toEqual({ center: [99, 79] });
   });
 });
 

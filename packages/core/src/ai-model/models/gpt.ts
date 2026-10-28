@@ -178,7 +178,8 @@ export const gptAdapters = {
     locate: {
       element: {
         resultFormat: {
-          coordinates: { shape: 'bbox', order: 'xy' },
+          // Pixel boxes may end on the image's right or bottom edge.
+          coordinates: { shape: 'bbox', boundsType: 'edges', order: 'xy' },
         },
       },
     },

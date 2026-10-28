@@ -10,13 +10,16 @@ import {
   unwrapCoordinateListLikeInput,
 } from '../shared/model-locate-result';
 
+// Qwen 2.5 answers in model-image pixels and may put a box or point on the right or bottom edge: edge bounds accept it.
 const qwen25BboxCoordinatesMeta = {
   shape: 'bbox',
+  boundsType: 'edges',
   order: 'xy',
   rounding: 'round',
 } as const;
 const qwen25PointCoordinatesMeta = {
   shape: 'point',
+  boundsType: 'edges',
   order: 'xy',
   rounding: 'round',
 } as const;

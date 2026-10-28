@@ -94,7 +94,10 @@ export type CoordinateRounding = 'round' | 'trunc' | 'none';
 export type BboxBoundsType = 'inclusive' | 'edges';
 
 export interface LocateResultCoordinates {
-  /** Bbox boundary semantics; defaults to inclusive pixel endpoints. */
+  /**
+   * Boundary semantics; bboxes default to inclusive pixel endpoints. `edges` also lets a point sit on the right or
+   * bottom edge (x === width), which is clamped into the content area instead of rejected.
+   */
   boundsType?: BboxBoundsType;
   shape: LocateResultShape;
   /** Axis order in the raw coordinates; defaults to xy. */
@@ -109,6 +112,7 @@ export interface LocateResultCoordinates {
 export type ResolvedLocateResultCoordinates =
   | {
       shape: 'point';
+      boundsType?: BboxBoundsType;
       order: 'xy' | 'yx';
       normalizedBy?: number;
       rounding: CoordinateRounding;
