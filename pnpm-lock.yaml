@@ -1090,6 +1090,9 @@ importers:
       '@types/semver':
         specifier: 7.7.0
         version: 7.7.0
+      gdp-wired:
+        specifier: 0.30.1
+        version: 0.30.1(typescript@5.8.3)
       langsmith:
         specifier: ^0.3.74
         version: 0.3.74(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.210.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.4.0(@opentelemetry/api@1.9.0))(openai@6.3.0(ws@8.20.0)(zod@3.25.76))
@@ -7045,6 +7048,18 @@ packages:
   galactus@2.0.2:
     resolution: {integrity: sha512-HmKyTFGomdAchz4umx8MwBnrnfFmdpwiTyGA4ZOF7rya2Lmgbc9qate4yweInL+0gUBVImhaz12SBGpW3SY4Yg==}
     engines: {node: '>=22.12.0'}
+
+  gdp-wired@0.30.1:
+    resolution: {integrity: sha512-kWCD7JQuLfCbNQyqu+v52kpGjhiFwFqFyOWVZP6VrrS984Rr1vFmUsQlGFxi4a3sRZpYDODnQWGGvPICdydBwA==}
+    engines: {node: '>=20'}
+    peerDependencies:
+      '@gdp-ts/core': '>=0.1.0'
+      typescript: '>=5.0.0'
+    peerDependenciesMeta:
+      '@gdp-ts/core':
+        optional: true
+      typescript:
+        optional: true
 
   generate-function@2.3.1:
     resolution: {integrity: sha512-eeB5GfMNeevm/GRYq20ShmsaGcmI81kIX2K9XQx5miC8KdHaC6Jm0qQ8ZNeGOi7wYB8OsdxKs+Y2oVuTFuVwKQ==}
@@ -18783,6 +18798,10 @@ snapshots:
       flora-colossus: 3.0.2
     transitivePeerDependencies:
       - supports-color
+
+  gdp-wired@0.30.1(typescript@5.8.3):
+    optionalDependencies:
+      typescript: 5.8.3
 
   generate-function@2.3.1:
     dependencies:
