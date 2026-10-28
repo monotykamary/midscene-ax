@@ -30,7 +30,9 @@ export function resolveLocateResultCoordinates(
   return {
     ...(coordinates.shape === 'bbox'
       ? { boundsType: coordinates.boundsType ?? 'inclusive' }
-      : {}),
+      : coordinates.boundsType === 'edges'
+        ? { boundsType: 'edges' as const }
+        : {}),
     shape: coordinates.shape,
     order: coordinates.order ?? 'xy',
     normalizedBy: coordinates.normalizedBy,
@@ -56,9 +58,9 @@ export function createLocateResultCodec(
       const result = parseRawLocateValue(rawResult);
       const { preparedSize, contentSize = preparedSize } = context;
       assertLocateResultStructure(result);
-      const edgeBounds =
-        isBboxLocateResultValue(result) &&
-        result.coordinatesMeta.boundsType === 'edges';
+      // Edge bounds accept a coordinate on the right or bottom edge: a bbox keeps it as its edge, a point is clamped
+      // into the content area with the center below.
+      const edgeBounds = result.coordinatesMeta.boundsType === 'edges';
       assertLocateResultCoordinateRangeAndOrder(
         result,
         preparedSize.width - (edgeBounds ? 0 : 1),

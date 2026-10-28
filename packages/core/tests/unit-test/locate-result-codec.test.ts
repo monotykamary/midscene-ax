@@ -61,6 +61,24 @@ describe('createLocateResultCodec', () => {
     ).toThrow(/exceed/);
   });
 
+  it('accepts an edge point and clamps it into the content area', () => {
+    const codec = createLocateResultCodec({
+      coordinates: { shape: 'point', boundsType: 'edges', rounding: 'none' },
+    });
+    expect(codec.toPixelResult([100, 80], locateCtx(100, 80))).toEqual({
+      center: [99, 79],
+    });
+    expect(() => codec.toPixelResult([101, 80], locateCtx(100, 80))).toThrow(
+      /exceed/,
+    );
+    const strict = createLocateResultCodec({
+      coordinates: { shape: 'point', rounding: 'none' },
+    });
+    expect(() => strict.toPixelResult([100, 80], locateCtx(100, 80))).toThrow(
+      /exceed/,
+    );
+  });
+
   it('preserves inclusive pixel bounds by default', () => {
     const codec = createLocateResultCodec({ coordinates: { shape: 'bbox' } });
     expect(

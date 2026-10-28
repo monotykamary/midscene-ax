@@ -241,7 +241,7 @@ describe('gpt model adapter', () => {
     ['gpt-6', gpt6Adapter],
   ] as const)(
     'pads %s screenshots to 32px blocks without shifting locate results',
-    async (_family, adapter) => {
+    async (family, adapter) => {
       const prepared = await prepareModelImage({
         imageBase64: localImg2Base64(getFixture('baidu.png')),
         width: 3282,
@@ -257,9 +257,11 @@ describe('gpt model adapter', () => {
       }
       const codec = adapter.locate.element.resultCodec;
       // Padding is appended right/bottom, so pixel bboxes map one to one.
+      // gpt-5 boxes are edge bounds; gpt-6 keeps inclusive pixel endpoints.
+      const side = family === 'gpt-5' ? 200 : 201;
       expect(codec.toPixelResult([100, 200, 300, 400], prepared)).toEqual({
         center: [200, 300],
-        rect: { left: 100, top: 200, width: 201, height: 201 },
+        rect: { left: 100, top: 200, width: side, height: side },
       });
       // A box reaching into the padding is clipped to the real screenshot.
       expect(
@@ -391,3 +393,25 @@ it.each(['low', 'auto', 'high'] as const)(
     ).toBe('original');
   },
 );
+
+describe('gpt pixel box edges', () => {
+  const context = { preparedSize: { width: 100, height: 80 } };
+  it('gpt-5 accepts a box ending on the image edge', () => {
+    const locate = gpt5Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(
+      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], context),
+    ).toEqual({
+      center: [80, 60],
+      rect: { left: 60, top: 40, width: 40, height: 40 },
+    });
+  });
+
+  it('gpt-6 keeps inclusive bounds', () => {
+    const locate = gpt6Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(() =>
+      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], context),
+    ).toThrow(/exceed/);
+  });
+});

@@ -41,12 +41,11 @@ export function assertLocateResultStructure(result: LocateResultValue): void {
   }
 
   if (
-    isBboxLocateResultValue(result) &&
-    result.coordinatesMeta.boundsType !== undefined &&
-    !['inclusive', 'edges'].includes(result.coordinatesMeta.boundsType)
+    coordinatesMeta.boundsType !== undefined &&
+    !['inclusive', 'edges'].includes(coordinatesMeta.boundsType)
   ) {
     throw new Error(
-      `invalid locate bbox boundsType: ${result.coordinatesMeta.boundsType}`,
+      `invalid locate ${coordinatesMeta.shape} boundsType: ${coordinatesMeta.boundsType}`,
     );
   }
   const { order, normalizedBy, rounding } = coordinatesMeta;
