@@ -58,6 +58,7 @@ export async function resolveTreeLocate(
   device: AbstractInterface,
   query: TreeQuery,
   signal?: AbortSignal,
+  options?: { forInput?: boolean },
 ): Promise<TreeLocateOutcome> {
   const abstain = (reason: string, matchCount?: number): TreeLocateOutcome => ({
     record: {
@@ -87,6 +88,17 @@ export async function resolveTreeLocate(
 
   if (matches.length === 0) {
     return abstain('no element matched', 0);
+  }
+  // Text goes into a field a user can type into: among several same-name
+  // matches (a read-only demo box beside the login field), the only editable
+  // one is the target.
+  let note: string | undefined;
+  if (options?.forInput && matches.length > 1) {
+    const editable = matches.filter((match) => match.editable === true);
+    if (editable.length === 1) {
+      note = `the only editable match of ${matches.length}`;
+      matches = editable;
+    }
   }
   if (matches.length > 1) {
     return abstain(
@@ -119,6 +131,7 @@ export async function resolveTreeLocate(
       query,
       outcome: 'hit',
       matchCount: 1,
+      ...(note ? { note } : {}),
       ref: match.ref,
       ...(match.revision !== undefined ? { revision: match.revision } : {}),
     },

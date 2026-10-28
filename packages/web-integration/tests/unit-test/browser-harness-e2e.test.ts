@@ -44,6 +44,8 @@ const FIXTURE = `<!doctype html>
     <button class="at" style="left:160px;top:70px" onclick="clicks.save++">Save</button>
     <input class="at" style="left:300px;top:20px;width:160px" aria-label="Email" type="email" />
     <input class="at" style="left:300px;top:70px;width:160px" aria-label="Start date" type="date" />
+    <input class="at" style="left:500px;top:20px;width:160px" placeholder="Password" value="ThisIsNotAPassword" readonly />
+    <input class="at" style="left:500px;top:70px;width:160px" aria-label="Password" type="password" />
     <button class="at" style="left:20px;top:200px" onclick="clicks.deleted++">Delete account</button>
     <div id="overlay">Cookie notice</div>
     <ul id="menu" role="menu"><li role="menuitem" tabindex="0">Settings</li></ul>
@@ -261,6 +263,17 @@ describe('BrowserHarnessPage against a real browser', () => {
             .value,
       ),
     ).toBe('a@b.c');
+  });
+
+  it('marks which of two same-name fields takes typing', async () => {
+    const fields = await device.locateInTree({
+      role: 'textbox',
+      name: 'Password',
+      exact: true,
+    });
+    expect(fields).toHaveLength(2);
+    expect(fields.map((field) => field.editable)).toEqual([false, true]);
+    expect(fields[1].rect).toMatchObject({ left: 500, top: 70 });
   });
 
   it('declines operations the guard cannot perform, so core uses coordinates', async () => {
