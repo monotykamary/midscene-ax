@@ -93,6 +93,12 @@ export const TMultimodalPromptSchema = z.object({
       z.object({
         name: z.string(),
         url: z.string(),
+        /**
+         * 'reference' (the default) is supporting context. 'current' is
+         * evidence of the current state, captured in the same observation
+         * (another region or moment of the page under test).
+         */
+        role: z.enum(['reference', 'current']).optional(),
       }),
     )
     .optional(),
