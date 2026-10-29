@@ -19,7 +19,10 @@ import {
   callAiAndParseWithRetry,
   withSemanticRetryFeedback,
 } from '../../service-caller/semantic-retry';
-import { multimodalPromptToMessages } from '../../shared/multimodal-prompt';
+import {
+  multimodalPromptImageRoles,
+  multimodalPromptToMessages,
+} from '../../shared/multimodal-prompt';
 import { extractBoolean } from './boolean';
 import { parseInsightResponse } from './insight-response-parser';
 
@@ -51,7 +54,7 @@ export async function AiExtractElementInfo<T>(options: ExtractOptions) {
   const insightProtocol = modelRuntime.adapter.insight.protocol;
   const systemPrompt = buildInsightSystemPrompt({
     screenshotIncluded: extractOption?.screenshotIncluded !== false,
-    referenceImagesIncluded: !!multimodalPrompt?.images?.length,
+    ...multimodalPromptImageRoles(multimodalPrompt),
     insightProtocol,
   });
   // A text-only extraction (screenshotIncluded: false) may come without a screenshot.
@@ -87,7 +90,10 @@ export async function AiExtractElementInfo<T>(options: ExtractOptions) {
     } else {
       userContent.push({
         type: 'text',
-        text: 'This is the current screenshot to evaluate. Unless <DATA_DEMAND> explicitly asks for comparison or matching against reference images, base your answer on this screenshot and its contents when provided.',
+        text: multimodalPromptImageRoles(multimodalPrompt)
+          .currentEvidenceImagesIncluded
+          ? 'This is the latest viewport screenshot. Additional evidence images were captured earlier in sequence and may show different application states. Use capture ordering and visible evidence; do not assume all depicted content coexisted.'
+          : 'This is the current screenshot to evaluate. Unless <DATA_DEMAND> explicitly asks for comparison or matching against reference images, base your answer on this screenshot and its contents when provided.',
       });
 
       userContent.push({
