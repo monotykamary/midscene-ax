@@ -1091,8 +1091,8 @@ importers:
         specifier: 7.7.0
         version: 7.7.0
       gdp-wired:
-        specifier: 0.30.1
-        version: 0.30.1(typescript@5.8.3)
+        specifier: 0.31.0
+        version: 0.31.0(typescript@5.8.3)
       langsmith:
         specifier: ^0.3.74
         version: 0.3.74(@opentelemetry/api@1.9.0)(@opentelemetry/exporter-trace-otlp-proto@0.210.0(@opentelemetry/api@1.9.0))(@opentelemetry/sdk-trace-base@2.4.0(@opentelemetry/api@1.9.0))(openai@6.3.0(ws@8.20.0)(zod@3.25.76))
@@ -1666,8 +1666,8 @@ importers:
         specifier: 0.0.1380148
         version: 0.0.1380148
       gdp-wired:
-        specifier: 0.30.1
-        version: 0.30.1(typescript@5.8.3)
+        specifier: 0.31.0
+        version: 0.31.0(typescript@5.8.3)
       js-yaml:
         specifier: 4.1.0
         version: 4.1.0
@@ -7052,14 +7052,17 @@ packages:
     resolution: {integrity: sha512-HmKyTFGomdAchz4umx8MwBnrnfFmdpwiTyGA4ZOF7rya2Lmgbc9qate4yweInL+0gUBVImhaz12SBGpW3SY4Yg==}
     engines: {node: '>=22.12.0'}
 
-  gdp-wired@0.30.1:
-    resolution: {integrity: sha512-kWCD7JQuLfCbNQyqu+v52kpGjhiFwFqFyOWVZP6VrrS984Rr1vFmUsQlGFxi4a3sRZpYDODnQWGGvPICdydBwA==}
+  gdp-wired@0.31.0:
+    resolution: {integrity: sha512-1UjlRM6QReZgS2C4e563KUQwQneQBfiB2IVVC+Ll4AqdG/pBhu7le51inEKPS3cA0GL97yIhRaMjc+SUpbofSA==}
     engines: {node: '>=20'}
     peerDependencies:
       '@gdp-ts/core': '>=0.1.0'
+      effect: ^3.22.0 || ^4.0.0
       typescript: '>=5.0.0'
     peerDependenciesMeta:
       '@gdp-ts/core':
+        optional: true
+      effect:
         optional: true
       typescript:
         optional: true
@@ -18802,7 +18805,7 @@ snapshots:
     transitivePeerDependencies:
       - supports-color
 
-  gdp-wired@0.30.1(typescript@5.8.3):
+  gdp-wired@0.31.0(typescript@5.8.3):
     optionalDependencies:
       typescript: 5.8.3
 
