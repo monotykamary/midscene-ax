@@ -268,6 +268,14 @@ export abstract class AbstractInterface {
    */
   getDeviceLocalTimeString?(format?: string): Promise<string>;
 
+  /**
+   * A description of the page the device shows now (for example the native
+   * state behind the screenshot), given to aiAct's planner with this round's
+   * request only; it is not kept in the conversation history. A failure is
+   * ignored.
+   */
+  planningContext?(): string | undefined | Promise<string | undefined>;
+
   /** URL of native MJPEG stream for real-time screen preview (e.g. WDA MJPEG server) */
   mjpegStreamUrl?: string;
 

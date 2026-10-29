@@ -283,6 +283,40 @@ export async function standardPlan(
     ...instruction,
     ...historyLog,
   ];
+  // This round's page description goes into this request only, never into the
+  // history that later rounds resend.
+  if (opts.pageDescription) {
+    const description = {
+      type: 'text' as const,
+      text: `<page_description>\n${opts.pageDescription}\n</page_description>`,
+    };
+    const last = msgs[msgs.length - 1];
+    if (
+      last &&
+      'type' in last &&
+      last.type === 'input-message' &&
+      last.message.role === 'user' &&
+      Array.isArray(last.message.content)
+    ) {
+      msgs[msgs.length - 1] = {
+        ...last,
+        message: {
+          ...last.message,
+          content: [...last.message.content, description],
+        },
+      };
+    } else if (
+      last &&
+      'role' in last &&
+      last.role === 'user' &&
+      Array.isArray(last.content)
+    ) {
+      msgs[msgs.length - 1] = {
+        ...last,
+        content: [...last.content, description],
+      };
+    }
+  }
 
   const {
     response: {

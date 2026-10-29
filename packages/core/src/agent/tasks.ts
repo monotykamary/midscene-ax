@@ -726,7 +726,17 @@ export class TaskExecutor {
               const preparedUserPrompt = await getPreparedUserPrompt();
 
               setTimingFieldOnce(timing, 'callAiStart');
+              // The device may describe the page it shows this round.
+              const pageDescription =
+                typeof this.interface.planningContext === 'function'
+                  ? await Promise.resolve(this.interface.planningContext())
+                      .then((text) =>
+                        typeof text === 'string' && text ? text : undefined,
+                      )
+                      .catch(() => undefined)
+                  : undefined;
               planResult = await planImpl(preparedUserPrompt, {
+                ...(pageDescription ? { pageDescription } : {}),
                 context: planningUiContext,
                 actionContext: renderAIContext(aiActContext),
                 actionSpace,
