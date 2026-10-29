@@ -199,6 +199,27 @@ describe('insight extraction prompt assembly', () => {
     });
   });
 
+  it('extracts from text alone when the context has no screenshot', async () => {
+    const { screenshot: _screenshot, ...context } = createFakeContext() as any;
+
+    const result = await AiExtractElementInfo<{ result: boolean }>({
+      taskType: 'extract',
+      context,
+      dataQuery: { StatementIsTruthy: 'The page says hello' },
+      extractOption: { screenshotIncluded: false },
+      modelRuntime: getModelRuntime(modelConfig),
+    });
+
+    expect(result.parseResult.data).toEqual({ result: true });
+    const msgs = rs.mocked(callGenerativeAI).mock.calls[0]?.[0];
+    const images = (msgs ?? []).flatMap((m: any) =>
+      Array.isArray(m.content)
+        ? m.content.filter((c: any) => c.type === 'image')
+        : [],
+    );
+    expect(images).toHaveLength(0);
+  });
+
   it('passes abortSignal to the AI caller', async () => {
     const abortController = new AbortController();
 

@@ -54,7 +54,8 @@ export async function AiExtractElementInfo<T>(options: ExtractOptions) {
     referenceImagesIncluded: !!multimodalPrompt?.images?.length,
     insightProtocol,
   });
-  const screenshotBase64 = context.screenshot.base64;
+  // A text-only extraction (screenshotIncluded: false) may come without a screenshot.
+  const screenshotBase64 = context?.screenshot?.base64;
 
   const renderedContext = renderAIContext(extractOption?.context);
   const extractDataPromptText = extractDataQueryPrompt(
