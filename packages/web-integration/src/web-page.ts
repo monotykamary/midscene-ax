@@ -13,6 +13,7 @@ import {
 
 import { sleep } from '@midscene/core/utils';
 import type { ElementInfo } from '@midscene/shared/extractor';
+import { getDebug } from '@midscene/shared/logger';
 import { transformHotkeyInput } from '@midscene/shared/us-keyboard-layout';
 
 const navigateParamSchema = z.object({
@@ -387,6 +388,16 @@ export abstract class AbstractWebPage extends AbstractInterface {
     timeoutMs?: number;
     target?: ElementInfo;
   }): Promise<void>;
+  /**
+   * Whether native date inputs show the day before the month, as the browser
+   * draws them. Undefined when the page cannot tell.
+   */
+  dateFieldsDayFirst?(): Promise<boolean | undefined>;
+  /**
+   * Calendar dates (YYYY-MM-DD) the current step names. When digits typed
+   * into a date field read as two different dates, the one named here wins.
+   */
+  dateHints?: string[];
 
   get mouse(): MouseAction {
     return {
@@ -464,6 +475,253 @@ const scheduleWebVisualUpdate = (
   void pendingRefresh?.catch(() => undefined);
 };
 
+// Native date and time inputs draw their own segmented editor (mm/dd/yyyy in
+// en-US). Keystrokes land segment by segment, and an ISO value typed into one
+// came out as "10/11/0002": the year digits spilled into the day and the
+// month. When the located field is one of these inputs, convert the value to
+// the format the input's `value` takes and set it the way a user's pick does
+// — the native setter, then `input` and `change` — instead of typing. Any
+// value it cannot read falls back to typing.
+const debugTypeText = getDebug('web:type-text');
+
+const NATIVE_TEMPORAL_INPUT = `((x, y, raw, shownDayFirst, hints) => {
+  let el = document.elementFromPoint(x, y);
+  for (let i = 0; i < 5 && el && el.shadowRoot; i++) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  if (el && el.tagName === 'LABEL' && el.control) el = el.control;
+  if (!el || el.tagName !== 'INPUT') return null;
+  const type = (el.type || '').toLowerCase();
+  if (!['date', 'time', 'datetime-local', 'month', 'week'].includes(type)) return null;
+  const v = String(raw).trim();
+  const pad = (n) => String(n).padStart(2, '0');
+  const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  // Digits typed into the field fill its segments in the order the browser
+  // shows them, day first or month first; read them the same way. The page's
+  // language does not say: on macOS Chrome draws the fields in the system
+  // region's order, and superapp flights-010 showed dd/mm/yyyy under an
+  // en-US navigator.language, so "10112026" became 11 Oct.
+  const dayFirst = typeof shownDayFirst === 'boolean'
+    ? shownDayFirst
+    : new Intl.DateTimeFormat(navigator.language)
+        .formatToParts(new Date(2000, 10, 22))
+        .find((p) => p.type === 'day' || p.type === 'month').type === 'day';
+  // The step often names the date itself ("set the departure date to
+  // 2026-11-10") while the planner types "11102026", guessing the field's
+  // order wrong (superapp flights-009, round 6). When the digits read as two
+  // dates and the step names one of them, that one is meant.
+  const named = (d) => (hints || []).includes(d[0] + '-' + pad(d[1]) + '-' + pad(d[2]));
+  const dmy = (a, b, y) => {
+    if (a <= 12 && b <= 12 && named([y, a, b]) !== named([y, b, a])) {
+      return named([y, a, b]) ? [y, a, b] : [y, b, a];
+    }
+    return a > 12 || (b <= 12 && dayFirst) ? [y, b, a] : [y, a, b];
+  };
+  let date = null;
+  let m = v.match(/^(\\d{4})-(\\d{1,2})-(\\d{1,2})/);
+  if (m) date = [+m[1], +m[2], +m[3]];
+  if (!date && (m = v.match(/^(\\d{1,2})[\\/.-](\\d{1,2})[\\/.-](\\d{4})/))) {
+    date = dmy(+m[1], +m[2], +m[3]);
+  }
+  // The planner types a date the way the field reads, without separators:
+  // superapp flights-009 sent "11102026" and the year spilled into "102026".
+  if (!date && (m = v.match(/^(\\d{2})(\\d{2})(\\d{4})$/))) {
+    date = /^(19|20)\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])$/.test(v)
+      ? [+v.slice(0, 4), +v.slice(4, 6), +v.slice(6)]
+      : dmy(+m[1], +m[2], +m[3]);
+  }
+  if (date && (date[1] < 1 || date[1] > 12 || date[2] < 1 || date[2] > 31)) date = null;
+  if (!date && (m = v.match(/^([A-Za-z]{3})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})/))) {
+    const mo = months.indexOf(m[1].toLowerCase());
+    if (mo >= 0) date = [+m[3], mo + 1, +m[2]];
+  }
+  if (!date && (m = v.match(/^(\\d{1,2})(?:st|nd|rd|th)?\\s+([A-Za-z]{3})[a-z]*\\.?,?\\s+(\\d{4})/))) {
+    const mo = months.indexOf(m[2].toLowerCase());
+    if (mo >= 0) date = [+m[3], mo + 1, +m[1]];
+  }
+  let time = null;
+  const t = v.match(/(?:^|[T\\s])(\\d{1,2}):(\\d{2})(?::\\d{2})?\\s*([ap]\\.?m\\.?)?/i);
+  if (t) {
+    let h = +t[1];
+    const ap = (t[3] || '').toLowerCase();
+    if (ap.startsWith('p') && h < 12) h += 12;
+    if (ap.startsWith('a') && h === 12) h = 0;
+    time = pad(h) + ':' + t[2];
+  }
+  let out = null;
+  const ymd = date && date[0] + '-' + pad(date[1]) + '-' + pad(date[2]);
+  if (type === 'date' && date) out = ymd;
+  else if (type === 'month' && date) out = date[0] + '-' + pad(date[1]);
+  else if (type === 'month' && (m = v.match(/^(\\d{4})-(\\d{1,2})$/))) out = m[1] + '-' + pad(+m[2]);
+  else if (type === 'week' && (m = v.match(/^(\\d{4})-?W(\\d{1,2})$/i))) out = m[1] + '-W' + pad(+m[2]);
+  else if (type === 'time' && time) out = time;
+  else if (type === 'datetime-local' && date) out = ymd + 'T' + (time || '00:00');
+  if (!out) return null;
+  const setter = Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set;
+  el.focus();
+  setter.call(el, out);
+  if (el.value !== out) return null;
+  el.dispatchEvent(new Event('input', { bubbles: true }));
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+  return out;
+})`;
+
+async function setNativeTemporalInput(
+  page: AbstractWebPage,
+  element: ElementInfo,
+  value: string,
+): Promise<boolean> {
+  if (!page.evaluateJavaScript || !element.center) {
+    return false;
+  }
+  const [x, y] = element.center;
+  const dayFirst = await page.dateFieldsDayFirst?.().catch(() => undefined);
+  const set = await page
+    .evaluateJavaScript<string | null>(
+      `${NATIVE_TEMPORAL_INPUT}(${x}, ${y}, ${JSON.stringify(value)}, ${JSON.stringify(dayFirst ?? null)}, ${JSON.stringify(page.dateHints ?? [])})`,
+    )
+    .catch(() => null);
+  if (typeof set !== 'string') {
+    return false;
+  }
+  debugTypeText('set native temporal input to "%s" for "%s"', set, value);
+  return true;
+}
+
+// A text field that takes a date names its format in the placeholder
+// ("mm/dd/yyyy") and parses only that. The planner, guessing the field was
+// segmented, typed superapp meridian-008's 12/24/2026 as "12242026"; the app
+// refused the booking and reset the form. When the located field names a
+// day/month/year format and the value is a date in another shape — digits
+// alone, ISO, or "Dec 24, 2026" — type it in the field's format instead.
+// A value already in that format, or a field with no format, is typed as is.
+const TEXT_DATE_FORMAT = `((x, y, raw) => {
+  let el = document.elementFromPoint(x, y);
+  for (let i = 0; i < 5 && el && el.shadowRoot; i++) {
+    const inner = el.shadowRoot.elementFromPoint(x, y);
+    if (!inner || inner === el) break;
+    el = inner;
+  }
+  if (el && el.tagName === 'LABEL' && el.control) el = el.control;
+  if (!el || el.tagName !== 'INPUT') return null;
+  if (!['', 'text', 'search', 'tel'].includes((el.getAttribute('type') || '').toLowerCase())) return null;
+  const SHAPE = /^(dd|mm|yyyy)([\\/.-])(dd|mm)\\2(dd|mm|yyyy)$/i;
+  let fmt = null;
+  for (const hint of [el.placeholder, el.dataset && el.dataset.datepicker, el.getAttribute('aria-label')]) {
+    const h = String(hint || '').trim();
+    if (SHAPE.test(h)) { fmt = h.toLowerCase(); break; }
+  }
+  if (!fmt) return null;
+  const parts = fmt.match(SHAPE);
+  const order = [parts[1], parts[3], parts[4]].map((p) => p.toLowerCase());
+  if (order.slice().sort().join() !== 'dd,mm,yyyy') return null;
+  const sep = parts[2];
+  const v = String(raw).trim();
+  const esc = sep.replace(/[.\\/-]/g, '\\\\$&');
+  const shaped = new RegExp('^' + order.map((p) => (p === 'yyyy' ? '\\\\d{4}' : '\\\\d{1,2}')).join(esc) + '$');
+  if (shaped.test(v)) return null;
+  const months = ['jan','feb','mar','apr','may','jun','jul','aug','sep','oct','nov','dec'];
+  let date = null;
+  let m = v.match(/^(\\d{4})-(\\d{1,2})-(\\d{1,2})$/);
+  if (m) date = { yyyy: +m[1], mm: +m[2], dd: +m[3] };
+  if (!date && /^\\d{8}$/.test(v)) {
+    if (order[0] !== 'yyyy' && /^(19|20)\\d{2}(0[1-9]|1[0-2])(0[1-9]|[12]\\d|3[01])$/.test(v)) {
+      date = { yyyy: +v.slice(0, 4), mm: +v.slice(4, 6), dd: +v.slice(6) };
+    } else {
+      date = {};
+      let at = 0;
+      for (const p of order) { const n = p === 'yyyy' ? 4 : 2; date[p] = +v.slice(at, at + n); at += n; }
+    }
+  }
+  if (!date && (m = v.match(/^([A-Za-z]{3})[a-z]*\\.?\\s+(\\d{1,2})(?:st|nd|rd|th)?,?\\s+(\\d{4})$/))) {
+    const mo = months.indexOf(m[1].toLowerCase());
+    if (mo >= 0) date = { yyyy: +m[3], mm: mo + 1, dd: +m[2] };
+  }
+  if (!date && (m = v.match(/^(\\d{1,2})(?:st|nd|rd|th)?\\s+([A-Za-z]{3})[a-z]*\\.?,?\\s+(\\d{4})$/))) {
+    const mo = months.indexOf(m[2].toLowerCase());
+    if (mo >= 0) date = { yyyy: +m[3], mm: mo + 1, dd: +m[1] };
+  }
+  if (!date || date.mm < 1 || date.mm > 12 || date.dd < 1 || date.dd > 31) return null;
+  return order.map((p) => (p === 'yyyy' ? String(date.yyyy) : String(date[p]).padStart(2, '0'))).join(sep);
+})`;
+
+async function textDateInFieldFormat(
+  page: AbstractWebPage,
+  element: ElementInfo,
+  value: string,
+): Promise<string> {
+  if (!page.evaluateJavaScript || !element.center) {
+    return value;
+  }
+  const [x, y] = element.center;
+  const shaped = await page
+    .evaluateJavaScript<string | null>(
+      `${TEXT_DATE_FORMAT}(${x}, ${y}, ${JSON.stringify(value)})`,
+    )
+    .catch(() => null);
+  if (typeof shaped !== 'string' || !shaped) {
+    return value;
+  }
+  debugTypeText('typing "%s" as "%s", the date field\'s format', value, shaped);
+  return shaped;
+}
+
+// superapp meridian-008: the date picker left open by the previous step
+// covered the Comment textarea's center, so the click to focus it landed on
+// the popup and the comment replaced the date. When something else sits on
+// top of the field at the located point, click a part of the same field that
+// is in the clear.
+const UNCOVERED_FIELD_POINT = `((x, y) => {
+  const editable = (e) => !!e && (e.isContentEditable || e.tagName === 'TEXTAREA' ||
+    (e.tagName === 'INPUT' && !['button', 'submit', 'reset', 'checkbox', 'radio', 'file', 'image', 'range', 'color', 'hidden'].includes((e.type || '').toLowerCase())));
+  const stack = document.elementsFromPoint(x, y);
+  const top = stack[0];
+  if (!top || editable(top) || top.closest('label')) return null;
+  const field = stack.find(editable);
+  if (!field || top.contains(field) || field.contains(top)) return null;
+  const r = field.getBoundingClientRect();
+  const xs = [0.85, 0.7, 0.95, 0.5, 0.3, 0.15, 0.05];
+  const ys = [0.5, 0.25, 0.75, 0.1, 0.9];
+  for (const fy of ys) {
+    for (const fx of xs) {
+      const px = Math.round(r.left + r.width * fx);
+      const py = Math.round(r.top + r.height * fy);
+      if (px < 0 || py < 0 || px >= innerWidth || py >= innerHeight) continue;
+      const hit = document.elementFromPoint(px, py);
+      if (hit && (hit === field || field.contains(hit))) return [px, py];
+    }
+  }
+  return null;
+})`;
+
+async function inTheClear(
+  page: AbstractWebPage,
+  element: ElementInfo,
+): Promise<ElementInfo> {
+  if (!page.evaluateJavaScript || !element.center) {
+    return element;
+  }
+  const [x, y] = element.center;
+  const point = await page
+    .evaluateJavaScript<[number, number] | null>(
+      `${UNCOVERED_FIELD_POINT}(${x}, ${y})`,
+    )
+    .catch(() => null);
+  if (!Array.isArray(point)) {
+    return element;
+  }
+  debugTypeText(
+    'field at (%d, %d) is covered; typing through (%d, %d)',
+    x,
+    y,
+    point[0],
+    point[1],
+  );
+  return { ...element, center: point };
+}
+
 export function createWebInputPrimitives(
   page: AbstractWebPage,
 ): BrowserInputPrimitives {
@@ -497,8 +755,27 @@ export function createWebInputPrimitives(
       },
     },
     keyboard: {
-      typeText: async (value, opts) => {
-        const element = opts?.target;
+      typeText: async (rawValue, opts) => {
+        const element = opts?.target
+          ? await inTheClear(page, opts.target as ElementInfo)
+          : undefined;
+        let value = rawValue;
+        if (
+          element &&
+          opts?.replace !== false &&
+          !opts?.focusOnly &&
+          (await setNativeTemporalInput(page, element as ElementInfo, value))
+        ) {
+          scheduleVisualUpdate();
+          return;
+        }
+        if (element && opts?.replace !== false && !opts?.focusOnly) {
+          value = await textDateInFieldFormat(
+            page,
+            element as ElementInfo,
+            value,
+          );
+        }
         const { inputStrategy, keyboardTypeDelay } = resolveTextInputOptions(
           opts,
           page,

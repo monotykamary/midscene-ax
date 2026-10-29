@@ -79,6 +79,12 @@ type ScreencastFrameEvent = {
   };
 };
 
+type CdpNode = {
+  attributes?: string[];
+  children?: CdpNode[];
+  shadowRoots?: CdpNode[];
+};
+
 type PageCdpSession = {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>;
   detach(): Promise<void>;
@@ -280,6 +286,72 @@ export class Page<
 
   async evaluateJavaScript<T = any>(script: string): Promise<T> {
     return this.evaluate(script);
+  }
+
+  private dateOrderProbe?: Promise<boolean | undefined>;
+  /**
+   * Calendar dates (YYYY-MM-DD) the current step names. When digits typed
+   * into a date field read as two different dates, the one named here wins.
+   */
+  dateHints?: string[];
+
+  // A page script cannot see how a native date input orders its fields: the
+  // fields live in a user-agent shadow root, and on macOS Chrome draws them in
+  // the system region's order whatever navigator.language says. CDP can read
+  // that shadow root, so probe a scratch input once per page.
+  async dateFieldsDayFirst(): Promise<boolean | undefined> {
+    this.dateOrderProbe ??= this.probeDateFieldOrder().catch((error) => {
+      debugPage('could not read the date field order: %s', error);
+      return undefined;
+    });
+    return this.dateOrderProbe;
+  }
+
+  private async probeDateFieldOrder(): Promise<boolean | undefined> {
+    const client = await this.createPageCdpSession('Reading date field order');
+    let objectId: string | undefined;
+    try {
+      const made = (await client.send('Runtime.evaluate', {
+        expression: `(() => {
+          const i = document.createElement('input');
+          i.type = 'date';
+          i.setAttribute('aria-hidden', 'true');
+          i.style.cssText = 'position:fixed;left:-9999px;top:0;';
+          document.documentElement.appendChild(i);
+          return i;
+        })()`,
+      })) as { result?: { objectId?: string } };
+      objectId = made.result?.objectId;
+      if (!objectId) return undefined;
+      const described = (await client.send('DOM.describeNode', {
+        objectId,
+        depth: -1,
+        pierce: true,
+      })) as { node: CdpNode };
+      const fields: string[] = [];
+      const walk = (n: CdpNode) => {
+        const attrs = n.attributes ?? [];
+        const at = attrs.indexOf('pseudo');
+        if (at >= 0) fields.push(attrs[at + 1]);
+        for (const c of [...(n.children ?? []), ...(n.shadowRoots ?? [])])
+          walk(c);
+      };
+      walk(described.node);
+      const day = fields.indexOf('-webkit-datetime-edit-day-field');
+      const month = fields.indexOf('-webkit-datetime-edit-month-field');
+      if (day < 0 || month < 0) return undefined;
+      return day < month;
+    } finally {
+      if (objectId) {
+        await client
+          .send('Runtime.callFunctionOn', {
+            objectId,
+            functionDeclaration: 'function () { this.remove(); }',
+          })
+          .catch(() => {});
+      }
+      void client.detach().catch(() => {});
+    }
   }
 
   async waitForNavigation(
