@@ -22,6 +22,8 @@ export interface PlanOptions {
   // Controls aiAct planning prompt shape and state updates, such as sub-goals.
   effort: AiActEffort;
   abortSignal?: AbortSignal;
+  /** The device's description of this round's page (AbstractInterface.planningContext); sent with this request only. */
+  pageDescription?: string;
 }
 
 export type PlanFn = (

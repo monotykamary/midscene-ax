@@ -109,6 +109,48 @@ const latestSystemPrompt = () => {
 const resolveImageDetail = new ResolvedModelAdapter({}, 'test')
   .resolveImageDetail;
 
+describe('page description from the device', () => {
+  beforeEach(() => {
+    rs.mocked(callGenerativeAI).mockReset();
+  });
+
+  const lastText = (call: number) => {
+    const entry = rs.mocked(callGenerativeAI).mock.calls[call]?.[0]?.at(-1);
+    const message = entry && ('role' in entry ? entry : (entry as any).message);
+    return (message?.content as any[])
+      .filter((part) => part.type === 'text')
+      .map((part) => part.text)
+      .join('\n');
+  };
+
+  it("goes into this round's request only, not the history later rounds resend", async () => {
+    rs.mocked(callGenerativeAI).mockResolvedValue(
+      mockAIResponse('<complete success="true">Done</complete>'),
+    );
+    const conversationHistory = new ConversationHistory();
+    const options = {
+      context: mockContext(),
+      actionSpace: mockActionSpace(),
+      modelRuntime: getModelRuntime({ ...mockModelConfig(), retryInterval: 0 }),
+      conversationHistory,
+      includeLocateInPlanning: false,
+      effort: 'balance' as const,
+    };
+    await standardPlan('tap the menu', {
+      ...options,
+      pageDescription: 'A native alert is open: "Saved"',
+    });
+    expect(lastText(0)).toContain(
+      '<page_description>\nA native alert is open: "Saved"\n</page_description>',
+    );
+    const kept = JSON.stringify(conversationHistory.snapshot());
+    expect(kept).not.toContain('page_description');
+
+    await standardPlan('tap the menu', options);
+    expect(lastText(1)).not.toContain('page_description');
+  });
+});
+
 describe('plan XML parse retry', () => {
   beforeEach(() => {
     rs.mocked(callGenerativeAI).mockReset();
