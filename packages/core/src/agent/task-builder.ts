@@ -855,9 +855,10 @@ export class TaskBuilder {
         //    again on the next run, and a cached point must not stand in for
         //    the tree when it later abstains on an ambiguous or hidden target
         if (
+          element &&
           this.taskCache &&
           locateCacheWritable({
-            found: !!element,
+            found: true,
             cacheEnabled: true,
             source,
             cacheExists: locateCacheAlreadyExists,

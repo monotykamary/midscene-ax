@@ -253,8 +253,8 @@ export function locateChainLaws(rule: typeof locateChainRule) {
       laws.push(
         rule.law(
           `the element never comes from both ${a.slice(4).toLowerCase()} and ${b.slice(4).toLowerCase()}`,
-          (_env, out) => [out[a]],
-          (out) => out[b].not(),
+          (_env, out) => [(out as Env)[a]],
+          (out) => (out as Env)[b].not(),
         ),
       );
   return laws;
@@ -383,33 +383,40 @@ export const receiptDropDiffRule = fun('ref-receipt-drop-diff')
   }));
 
 export function receiptLaws(rule: typeof receiptRule) {
+  // The outputs come from receiptReturns, shared by the broken variants, so
+  // their kinds are read as conditions and terms here.
+  const law = rule.law.bind(rule) as (
+    name: string,
+    premises: (env: Env, out: Env) => unknown[],
+    conclusion: (out: Env, env: Env) => unknown,
+  ) => ReturnType<typeof rule.law>;
   return [
-    rule.law(
+    law(
       'only a stale receipt falls back to coordinates',
       (_env, out) => [out.coordinates],
       (_out, env) => env.status.is('stale'),
     ),
-    rule.law(
+    law(
       'a stale receipt falls back to coordinates at most once',
       () => [],
       (out) => out.coordinateCalls.atMost(1),
     ),
-    rule.law(
+    law(
       'a blocked receipt throws',
       (env) => [env.status.is('blocked')],
       (out) => out.throws,
     ),
-    rule.law(
+    law(
       'a blocked receipt throws with its reason',
       (env) => [env.status.is('blocked'), env.reason],
       (out) => out.reasonKept,
     ),
-    rule.law(
+    law(
       'an unknown outcome is never verified',
       (env) => [env.status.is('outcome_unknown')],
       (out) => out.verifiedYes.not(),
     ),
-    rule.law(
+    law(
       'an executed receipt carries its diff',
       (env) => [env.status.is('executed'), env.diff],
       (out) => out.diffKept,
