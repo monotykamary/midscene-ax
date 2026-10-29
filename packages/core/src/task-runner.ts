@@ -557,7 +557,10 @@ export class TaskRunner {
         throw new Error(errorMsg || 'error without thought');
       },
     };
-    await this.appendAndFlush(errorTask);
+    // The planning loop records its end (too many errors, the replan limit, an
+    // abort) after an action failed. In error state a plain append throws
+    // 'cannot append task' and hides that end, so record it anyway.
+    await this.appendAndFlush(errorTask, { allowWhenError: true });
 
     return {
       output: undefined,
