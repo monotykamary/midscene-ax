@@ -12,6 +12,8 @@ import { ResolvedModelAdapter } from '@/ai-model/model-adapter/resolve';
 import { getModelRuntime } from '@/ai-model/models';
 import { callGenerativeAI } from '@/ai-model/service-caller';
 import {
+  CODEX_MODEL_CALL_PREAMBLE,
+  CODEX_MODEL_CALL_THREAD_CONFIG,
   __shutdownCodexAppServerForTests,
   buildCodexTurnPayloadFromMessages,
   callAIWithCodexAppServer,
@@ -94,6 +96,15 @@ if (message.method === 'initialize') {
 });
 `,
   );
+  await installFakeCodex(executableDirectory);
+  return {
+    requestLog: path.join(executableDirectory, 'requests.log'),
+    releaseFile: path.join(executableDirectory, 'release'),
+  };
+};
+
+/** Puts the codex-server.cjs in a directory first on PATH as the `codex` executable. */
+const installFakeCodex = async (executableDirectory: string) => {
   if (process.platform === 'win32') {
     // Node's spawn without `shell: true` can only execute real Windows
     // executables (no `.cmd`/`.bat` shims), so provide a `codex.exe` that
@@ -121,10 +132,52 @@ if (message.method === 'initialize') {
     'PATH',
     `${executableDirectory}${path.delimiter}${process.env.PATH ?? ''}`,
   );
-  return {
-    requestLog: path.join(executableDirectory, 'requests.log'),
-    releaseFile: path.join(executableDirectory, 'release'),
-  };
+};
+
+/**
+ * A fake app-server whose turn posts the given agent messages, then completes.
+ * It logs each thread/start's params and each turn/interrupt, one JSON line each.
+ */
+const setupScriptedCodexServer = async (
+  messages: Array<{ phase?: string; text: string }>,
+) => {
+  const executableDirectory = await createTemporaryDirectory();
+  await writeFile(
+    path.join(executableDirectory, 'codex-server.cjs'),
+    `const { appendFileSync } = require('node:fs');
+const path = require('node:path');
+const readline = require('node:readline').createInterface({ input: process.stdin });
+const send = (message) => process.stdout.write(JSON.stringify(message) + '\\n');
+const log = (entry) => appendFileSync(path.join(__dirname, 'requests.log'), JSON.stringify(entry) + '\\n');
+const messages = ${JSON.stringify(messages)};
+readline.on('line', (line) => {
+const message = JSON.parse(line);
+if (message.method === 'thread/start') {
+  log({ method: 'thread/start', params: message.params });
+  send({ id: message.id, result: { thread: { id: 'thread-1' } } });
+} else if (message.method === 'turn/start') {
+  send({ id: message.id, result: { turn: { id: 'turn-1' } } });
+  messages.forEach((item, i) => send({
+    method: 'item/completed',
+    params: { threadId: 'thread-1', turnId: 'turn-1', item: { id: 'msg-' + i, type: 'agentMessage', ...item } },
+  }));
+  send({ method: 'turn/completed', params: { threadId: 'thread-1', turn: { id: 'turn-1', status: 'completed' } } });
+} else if (message.method === 'turn/interrupt') {
+  log({ method: 'turn/interrupt' });
+  send({ id: message.id, result: {} });
+} else if (message.id !== undefined) {
+  send({ id: message.id, result: {} });
+}
+});
+`,
+  );
+  await installFakeCodex(executableDirectory);
+  const logged = async () =>
+    (await readFile(path.join(executableDirectory, 'requests.log'), 'utf8'))
+      .trim()
+      .split('\n')
+      .map((line) => JSON.parse(line));
+  return { logged };
 };
 
 const resolveImageDetail = new ResolvedModelAdapter({}, 'test')
@@ -610,5 +663,104 @@ describe('codex app-server provider helper', () => {
     );
 
     await __shutdownCodexAppServerForTests();
+  });
+  it('starts model-call threads with every tool switched off', async () => {
+    const { logged } = await setupScriptedCodexServer([
+      { phase: 'final_answer', text: 'ok' },
+    ]);
+    await callAIWithCodexAppServer(
+      [{ role: 'user', content: 'hello' }],
+      baseModelConfig,
+      {
+        resolveImageDetail,
+      },
+    );
+    const start = (await logged()).find((m) => m.method === 'thread/start');
+    expect(start.params.config).toEqual(CODEX_MODEL_CALL_THREAD_CONFIG);
+    expect(start.params.config).toMatchObject({
+      'features.shell_tool': false,
+      'features.computer_use': false,
+      'features.multi_agent': false,
+      web_search: 'disabled',
+    });
+  });
+
+  it('leads the developer instructions with the engine-acts preamble', async () => {
+    const { logged } = await setupScriptedCodexServer([
+      { phase: 'final_answer', text: 'ok' },
+    ]);
+    await callAIWithCodexAppServer(
+      [
+        { role: 'system', content: 'Plan the next action.' },
+        { role: 'user', content: 'hello' },
+      ],
+      baseModelConfig,
+      { resolveImageDetail },
+    );
+    const start = (await logged()).find((m) => m.method === 'thread/start');
+    expect(start.params.developerInstructions).toBe(
+      `${CODEX_MODEL_CALL_PREAMBLE}\n\nPlan the next action.`,
+    );
+  });
+
+  it('returns the final answer, not the commentary before it', async () => {
+    await setupScriptedCodexServer([
+      { phase: 'commentary', text: 'Looking at the screenshot first.' },
+      { phase: 'final_answer', text: '{"bbox":[1,2,3,4]}' },
+    ]);
+    const result = await callAIWithCodexAppServer(
+      [{ role: 'user', content: 'hello' }],
+      baseModelConfig,
+      { resolveImageDetail },
+    );
+    expect(result.content).toBe('{"bbox":[1,2,3,4]}');
+  });
+
+  it('answers with the commentary when the final answer is empty', async () => {
+    await setupScriptedCodexServer([
+      { phase: 'commentary', text: '<planning>tap</planning>' },
+      { phase: 'final_answer', text: '' },
+    ]);
+    const result = await callAIWithCodexAppServer(
+      [{ role: 'user', content: 'hello' }],
+      baseModelConfig,
+      { resolveImageDetail },
+    );
+    expect(result.content).toBe('<planning>tap</planning>');
+  });
+
+  it('interrupts a commentary runaway and answers with its latest message', async () => {
+    const { logged } = await setupScriptedCodexServer([
+      { phase: 'commentary', text: 'one' },
+      { phase: 'commentary', text: 'two' },
+      { phase: 'commentary', text: 'three' },
+      { phase: 'commentary', text: 'four' },
+    ]);
+    const result = await callAIWithCodexAppServer(
+      [{ role: 'user', content: 'hello' }],
+      baseModelConfig,
+      { resolveImageDetail },
+    );
+    expect(result.content).toBe('three');
+    expect((await logged()).some((m) => m.method === 'turn/interrupt')).toBe(
+      true,
+    );
+  });
+
+  it('fails a commentary runaway that never said anything', async () => {
+    await setupScriptedCodexServer([
+      { phase: 'commentary', text: '' },
+      { phase: 'commentary', text: ' ' },
+      { phase: 'commentary', text: '' },
+    ]);
+    await expect(
+      callAIWithCodexAppServer(
+        [{ role: 'user', content: 'hello' }],
+        baseModelConfig,
+        {
+          resolveImageDetail,
+        },
+      ),
+    ).rejects.toThrow(/without an answer after 3 messages/);
   });
 });
