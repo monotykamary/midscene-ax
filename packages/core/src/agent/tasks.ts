@@ -1109,6 +1109,10 @@ export class TaskExecutor {
           // If AI returned a plain string instead of structured format, use it directly
           if (typeof data === 'string') {
             outputResult = data;
+          } else if (typeof data === 'boolean' || typeof data === 'number') {
+            // Some models answer a bare `true` instead of
+            // `{[keyOfResult]: true}`; the value itself is the result.
+            outputResult = data;
           } else if (type === 'WaitFor') {
             if (data === null || data === undefined) {
               outputResult = false;
