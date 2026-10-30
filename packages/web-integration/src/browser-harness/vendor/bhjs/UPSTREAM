@@ -1,7 +1,7 @@
 browser-harness-js SDK (skills/cdp/sdk), vendored because it is not published to npm.
 
 Upstream: https://github.com/monotykamary/browser-harness-js
-Commit:   20fc83d8c79f087e982dc8deee4a7acb8abeae0e (2026-10-28)
+Commit:   3c436dcbed8a597cfc2e338c47eaccf9b643a31b (2026-10-30, SDK 0.19.0)
 License:  MIT (LICENSE in this directory)
 
 Files: browser.ts chrome.ts extension-hub.ts generated.ts interaction.ts page.ts
@@ -9,7 +9,12 @@ Files: browser.ts chrome.ts extension-hub.ts generated.ts interaction.ts page.ts
 Not vendored: recording.ts (the rrweb DOM tape), tests, gen.ts, repl.ts, the protocol JSON.
 
 No local patches: the guard patches this directory used to carry (transparent native controls, the sensitive-field
-grant, readable-frame limits, role locators on large pages, refusal reasons) are upstream since that commit.
+grant, readable-frame limits, role locators on large pages, refusal reasons) are upstream since 20fc83d. Since
+3c436dc upstream also carries the flow-runner pilot's last patches: trusted fill types like a person (click,
+select-all, a key per keyable character, other scripts committed whole, long text pasted), native date and time
+controls, maskSensitive, transparent file inputs, closed-shadow host hits and headers on connect. typeKeys and
+SELECT_ALL_MODIFIER are exported from interaction.ts, so @midscene/web/browser-harness re-exports them from here
+(the browser-harness/keys.ts copy is gone).
 
 Keep this directory out of the formatter and linter (biome.json files.ignore) so it stays byte-comparable with
 upstream.
