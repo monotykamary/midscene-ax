@@ -286,12 +286,24 @@ describe('BrowserHarnessPage against a real browser', () => {
     expect(
       await device.supportsRefOperation(login, 'keyboardPress', 'Enter'),
     ).toBe(true);
-    const date = await only('Start date');
-    expect(await device.supportsRefOperation(date, 'input', '2026-10-26')).toBe(
-      false,
-    );
     const disabled = await only('Submit order');
     expect(await device.supportsRefOperation(disabled, 'tap')).toBe(true);
+  });
+
+  it('types a native date control through the guard and verifies its value', async () => {
+    const date = await only('Start date');
+    expect(await device.supportsRefOperation(date, 'input', '2026-10-26')).toBe(
+      true,
+    );
+    const receipt = await device.actOnRef(date, 'input', '2026-10-26');
+    expect(receipt).toMatchObject({ status: 'executed', verified: true });
+    expect(
+      await observer.evaluate(
+        () =>
+          (document.querySelector('input[type=date]') as HTMLInputElement)
+            .value,
+      ),
+    ).toBe('2026-10-26');
   });
 
   it('rebinds a ref made stale by a rerender to the same element', async () => {
