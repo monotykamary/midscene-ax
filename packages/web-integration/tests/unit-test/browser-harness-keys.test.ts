@@ -35,4 +35,21 @@ describe('browser-harness typing exports', () => {
     expect(sent[2]![1]).toMatchObject({ code: 'KeyB', modifiers: 8 });
     expect(sent[4]![1]).toMatchObject({ code: 'Digit1', modifiers: 8 });
   });
+
+  it('commits characters no key types whole, one grapheme at a time: Japanese, Vietnamese, emoji', async () => {
+    const inserted = async (text: string) => {
+      const sent: Array<[string, any]> = [];
+      await typeKeys(async (method, params) => {
+        sent.push([method, params]);
+      }, text);
+      return sent
+        .filter(([method]) => method === 'Input.insertText')
+        .map(([, params]) => params.text);
+    };
+    expect(await inserted('東京')).toEqual(['東', '京']);
+    expect(await inserted('Việt Nam')).toEqual(['ệ']);
+    // Decomposed tone marks stay with their letter.
+    expect(await inserted('Vie\u0302\u0323t')).toEqual(['e\u0302\u0323']);
+    expect(await inserted('👩‍👩‍👧')).toEqual(['👩‍👩‍👧']);
+  });
 });
