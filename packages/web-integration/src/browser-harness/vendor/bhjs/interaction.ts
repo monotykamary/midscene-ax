@@ -1211,7 +1211,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     if (referenced === null) return null;
     const name = (referenced || el.getAttribute('aria-label') || '').trim();
     if (!name && !SCROLL_ROLES.includes(role)) return null;
-    if (tooLong(name, LIMITS.text) || closestComposed(el, '[data-private], [data-sensitive]')) return null;
+    if (tooLong(name, LIMITS.text) || privateMarked(el)) return null;
     const rect = el.getBoundingClientRect();
     const x = rect.x + rect.width / 2;
     const y = rect.y + rect.height / 2;
@@ -1529,7 +1529,8 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     return { verified: masked ? null : after === expected, source, blurred, masked,
       before: masked ? '[masked]' : before,
       after: masked ? (after === before ? '[masked, unchanged]' : '[masked, changed]') : after,
-      ...(masked ? { variants: [expected, before, after] } : {}) };
+      // Raw forms go to the host only for a value the caller declared secret, never for every masked field.
+      ...(sensitive ? { variants: [expected, before, after] } : {}) };
   },
   checkEditor(index, replacement = false) {
     const ref = refs[index];

@@ -22,4 +22,6 @@ upstream.
 
 Fork-local changes past that baseline: ScopeBinding carries the authored targetRole/targetName/targetExact and
 Page.perform refuses a resolved node that is no longer that target (scope_target_mismatch) before dispatch; refusal
-descriptions withhold sensitive and masked text under the grant; goto waits for document readiness.
+descriptions withhold sensitive and masked text under the grant; goto waits for document readiness. A blocked action
+reports the guard's own refusal before the DOM diagnostic; raw commit values reach the host only for a declared
+secret; private-marked scroll regions are offered under the sensitive grant like other private-marked controls.

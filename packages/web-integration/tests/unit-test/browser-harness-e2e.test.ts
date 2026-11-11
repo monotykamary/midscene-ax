@@ -5,6 +5,7 @@ import {
   BrowserHarnessAgent,
   BrowserHarnessPage,
   InteractionController,
+  Page,
 } from '@/browser-harness';
 import type { TreeMatch } from '@midscene/core';
 import {
@@ -538,6 +539,138 @@ describe('BrowserHarnessPage against a real browser', () => {
       guard.close();
       await observer.evaluate(() =>
         document.querySelector('#refusal-fixture')?.remove(),
+      );
+    }
+  });
+
+  it("blocks an ungranted sensitive field with the guard's own refusal", async () => {
+    const denied = new Page(device.session, {
+      sessionId: device.page.scope.sessionId,
+      allowedOrigins: [baseUrl],
+      allowSensitive: false,
+    });
+    const passwordValue = () =>
+      observer.evaluate(
+        () =>
+          (document.querySelector('input[type="password"]') as HTMLInputElement)
+            .value,
+      );
+    const before = await passwordValue();
+    try {
+      const refused = await denied
+        .locator('input[type="password"]')
+        .fill('fixture-forbidden');
+      expect(refused.status).toBe('blocked');
+      expect(refused.reason).toMatch(
+        /^not_interactable_or_unsupported: sensitive: /,
+      );
+      expect(await passwordValue()).toBe(before);
+    } finally {
+      denied.dispose();
+    }
+  });
+
+  it('hands raw commit values to the host only for a declared secret', async () => {
+    await observer.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'variants-fixture';
+      input.type = 'password';
+      input.style.cssText =
+        'position:fixed;left:600px;top:140px;width:120px;height:30px;z-index:1000';
+      document.body.appendChild(input);
+    });
+    const guard = new InteractionController(device.session, {
+      allowedOrigins: [baseUrl],
+      input: 'trusted',
+      allowSensitive: true,
+      maskSensitive: true,
+    });
+    const commit = async (text: string, sensitive?: boolean) => {
+      const root = await device.page.cdp('DOM.getDocument', {});
+      const selected = await device.page.cdp('DOM.querySelector', {
+        nodeId: root.root.nodeId,
+        selector: '#variants-fixture',
+      });
+      const described = await device.page.cdp('DOM.describeNode', {
+        nodeId: selected.nodeId,
+      });
+      const observed = await guard.observe({
+        scope: device.page.scope,
+        backendNodeId: described.node.backendNodeId,
+      });
+      const targetId = observed.candidates[0].id;
+      const acted = await guard.act({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        action: { targetId, operation: 'type', text },
+      });
+      expect(acted.status).toBe('executed');
+      return guard.commitTypedValue({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        targetId,
+        sensitive,
+      });
+    };
+    try {
+      const masked = await commit('fixture-masked-only');
+      expect(masked.masked).toBe(true);
+      expect(masked.secretVariants).toBeUndefined();
+      const declared = await commit('fixture-declared-secret', true);
+      expect(declared.masked).toBe(true);
+      expect(declared.secretVariants).toContain('fixture-declared-secret');
+      expect(JSON.stringify(declared)).not.toContain('fixture-declared-secret');
+    } finally {
+      guard.close();
+      await observer.evaluate(() =>
+        document.querySelector('#variants-fixture')?.remove(),
+      );
+    }
+  });
+
+  it('offers a private-marked scroll region only under the sensitive grant', async () => {
+    await observer.evaluate(() => {
+      const region = document.createElement('div');
+      region.id = 'private-scroll-fixture';
+      region.setAttribute('role', 'log');
+      region.setAttribute('aria-label', 'Private log');
+      region.dataset.private = '';
+      region.style.cssText =
+        'position:fixed;left:20px;top:120px;width:200px;height:60px;overflow-y:auto;z-index:1000;background:#fff';
+      region.innerHTML = '<div style="height:400px">entries</div>';
+      document.body.appendChild(region);
+    });
+    const root = await device.page.cdp('DOM.getDocument', {});
+    const selected = await device.page.cdp('DOM.querySelector', {
+      nodeId: root.root.nodeId,
+      selector: '#private-scroll-fixture',
+    });
+    const { node } = await device.page.cdp('DOM.describeNode', {
+      nodeId: selected.nodeId,
+    });
+    const observe = async (allowSensitive: boolean) => {
+      const guard = new InteractionController(device.session, {
+        allowedOrigins: [baseUrl],
+        input: 'trusted',
+        allowSensitive,
+      });
+      try {
+        return await guard.observe({
+          scope: device.page.scope,
+          backendNodeId: node.backendNodeId,
+        });
+      } finally {
+        guard.close();
+      }
+    };
+    try {
+      const granted = await observe(true);
+      expect(granted.candidates).toHaveLength(1);
+      expect(granted.candidates[0].operations).toContain('scroll_down');
+      expect((await observe(false)).candidates).toHaveLength(0);
+    } finally {
+      await observer.evaluate(() =>
+        document.querySelector('#private-scroll-fixture')?.remove(),
       );
     }
   });
