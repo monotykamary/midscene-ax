@@ -224,6 +224,65 @@ describe('service-caller streaming usage', () => {
   });
 });
 
+describe('service-caller streaming choices', () => {
+  beforeEach(() => {
+    mockCreate.mockReset();
+  });
+
+  it('reads the last choice with text when a gateway splits the reply', async () => {
+    mockCreate.mockResolvedValue(
+      Object.assign(
+        (async function* () {
+          yield {
+            choices: [
+              {
+                index: 0,
+                delta: { role: 'assistant', content: '' },
+                finish_reason: null,
+              },
+              {
+                index: 1,
+                delta: { role: 'assistant', content: 'Hel' },
+                finish_reason: null,
+              },
+            ],
+          };
+          yield {
+            choices: [
+              { index: 1, delta: { content: 'lo' }, finish_reason: null },
+            ],
+          };
+          yield {
+            choices: [
+              { index: 0, delta: {}, finish_reason: 'stop' },
+              { index: 1, delta: {}, finish_reason: 'stop' },
+            ],
+          };
+        })(),
+        { controller: new AbortController() },
+      ),
+    );
+    const chunks: CodeGenerationChunk[] = [];
+    const result = await callGenerativeAI(
+      messages,
+      getModelRuntime(modelConfig),
+      {
+        stream: true,
+        onChunk: (chunk) => chunks.push(chunk),
+      },
+    );
+    expect(result.content).toBe('Hello');
+    expect(result.rawAssistantOutput).toMatchObject({
+      type: 'chat-completion',
+      rawValue: { role: 'assistant', content: 'Hello' },
+    });
+    expect(chunks.at(-1)).toMatchObject({
+      accumulated: 'Hello',
+      isComplete: true,
+    });
+  });
+});
+
 describe('streaming retry boundaries', () => {
   beforeEach(() => {
     mockCreate.mockReset();

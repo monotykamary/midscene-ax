@@ -348,7 +348,7 @@ describe('qwen model adapter', () => {
     });
   });
 
-  it('preserves fractional pixel bbox coordinates and center for qwen2.5-vl', () => {
+  it('rounds fractional pixel bbox coordinates and center for qwen2.5-vl', () => {
     const locateAdapter = qwen25Adapter.locate;
     expect(locateAdapter.kind).toBe('standard');
     if (locateAdapter.kind !== 'standard') {
@@ -360,8 +360,8 @@ describe('qwen model adapter', () => {
       { preparedSize: { width: 1000, height: 1000 } },
     );
     expect(result).toEqual({
-      center: [201, 300.875],
-      rect: { left: 100.25, top: 200.5, width: 202.5, height: 201.75 },
+      center: [201, 301],
+      rect: { left: 100, top: 201, width: 202, height: 200 },
     });
   });
 
@@ -412,6 +412,31 @@ describe('qwen model adapter', () => {
   });
 });
 
+describe('Qwen 2.5 edge coordinates', () => {
+  it('accepts a pixel box ending on the image edge', () => {
+    const locate = qwen25Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(
+      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], {
+        preparedSize: { width: 100, height: 80 },
+      }),
+    ).toEqual({
+      center: [80, 60],
+      rect: { left: 60, top: 40, width: 40, height: 40 },
+    });
+  });
+
+  it('accepts a point on the image edge and clamps it inside', () => {
+    const locate = qwen25Adapter.locate;
+    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
+    expect(
+      locate.element.resultCodec.toPixelResult([100, 80], {
+        preparedSize: { width: 100, height: 80 },
+      }),
+    ).toEqual({ center: [99, 79] });
+  });
+});
+
 describe('Qwen point grounding', () => {
   it('preserves Qwen 2.5 point fallback at an edge instead of shifting by 10px', () => {
     const locate = qwen25Adapter.locate;
@@ -419,13 +444,13 @@ describe('Qwen point grounding', () => {
     const context = { preparedSize: { width: 100, height: 80 } };
     expect(
       locate.element.resultCodec.toPixelResult([0.25, 0.5], context).center,
-    ).toEqual([0.25, 0.5]);
+    ).toEqual([0, 1]);
     expect(
       locate.element.resultCodec.toPixelResult([99, 79], context).center,
     ).toEqual([99, 79]);
     expect(
       locate.element.resultCodec.toPixelResult([10, 20, 11, 21], context)
         .center,
-    ).toEqual([10.5, 20.5]);
+    ).toEqual([10, 20]); // The single pixel inside [10, 11) × [20, 21).
   });
 });

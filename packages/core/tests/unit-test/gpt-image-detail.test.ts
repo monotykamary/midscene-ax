@@ -135,27 +135,27 @@ describe('GPT image detail handling', () => {
     {
       intent: 'locate',
       requiresOriginalImageDetail: false,
-      expected: 'original',
+      expected: { 'gpt-5': 'original', 'gpt-6': 'original' },
     },
     {
       intent: 'default',
       requiresOriginalImageDetail: false,
-      expected: 'high',
+      expected: { 'gpt-5': 'original', 'gpt-6': 'high' },
     },
     {
       intent: 'default',
       requiresOriginalImageDetail: true,
-      expected: 'original',
+      expected: { 'gpt-5': 'original', 'gpt-6': 'original' },
     },
     {
       intent: 'planning',
       requiresOriginalImageDetail: false,
-      expected: 'high',
+      expected: { 'gpt-5': 'original', 'gpt-6': 'high' },
     },
     {
       intent: 'planning',
       requiresOriginalImageDetail: true,
-      expected: 'original',
+      expected: { 'gpt-5': 'original', 'gpt-6': 'original' },
     },
   ] as const)(
     'uses the model image detail policy for Codex with %j',
@@ -176,7 +176,7 @@ describe('GPT image detail handling', () => {
             mockCodexCall.mock.calls
               .at(-1)?.[2]
               ?.resolveImageDetail?.({ imageDetail: undefined }),
-          ).toBe(expected);
+          ).toBe(expected[modelFamily]);
           expect(imageMessage[0].content[0]).not.toHaveProperty('detail');
           expect(imageDetailSpy).toHaveBeenCalledExactlyOnceWith({
             imageDetail: undefined,
@@ -222,7 +222,7 @@ describe('GPT image detail handling', () => {
   });
 
   it.each(['default', 'planning', 'insight'] as const)(
-    'uses high detail for the %s intent',
+    'uses original detail for the gpt-5 %s intent',
     async (intent) => {
       await callGenerativeAI(
         imageMessage,
@@ -243,7 +243,7 @@ describe('GPT image detail handling', () => {
                   type: 'image_url',
                   image_url: {
                     url: 'https://example.com/shot.png',
-                    detail: 'high',
+                    detail: 'original',
                   },
                 },
                 {
