@@ -478,7 +478,8 @@ export class Page {
       const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId, scopeBinding, scopeRootBackendNodeId }, { signal });
       let seen = await observe();
       let candidate = seen.candidates[0];
-      if (!candidate || seen.truncated) return { status: 'blocked', reason: 'not_interactable_or_unsupported' + (seen.truncated ? ': observation truncated' : await this.whyNotInteractable(ref, signal)), verified: null };
+      // The guard's own refusal knows its policy (the sensitive grant, masking); the DOM diagnostic is a fallback.
+      if (!candidate || seen.truncated) return { status: 'blocked', reason: 'not_interactable_or_unsupported' + (seen.truncated ? ': observation truncated' : seen.refusal ? `: ${seen.refusal}` : await this.whyNotInteractable(ref, signal)), verified: null };
       if (operation !== 'scroll_into_view' && candidate.operations.length === 1 && candidate.operations[0] === 'scroll_into_view') {
         attempted = true;
         const scroll = await this.guard.act({ scope: this.scope, observationId: seen.observationId, action: { targetId: candidate.id, operation: 'scroll_into_view' } }, { signal });
