@@ -29,6 +29,11 @@ export default defineConfig({
     },
   ],
   source: {
+    // Bundleless: compile every TypeScript file, but not the LICENSE and
+    // UPSTREAM notes kept beside vendored code.
+    entry: {
+      index: ['./src/**/*.ts'],
+    },
     tsconfigPath: 'tsconfig.build.json',
     define: {
       __VERSION__: JSON.stringify(version),

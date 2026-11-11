@@ -392,6 +392,7 @@ export type TGlobalConfig = Record<TEnvKeys, string | undefined>;
  */
 export type TModelFamily =
   | 'jev'
+  | 'ant-ling'
   | 'qwen2.5-vl'
   | 'qwen3-vl'
   | 'qwen3'
@@ -409,12 +410,14 @@ export type TModelFamily =
   | 'gpt-5'
   | 'gpt-6'
   | 'deepseek'
+  | 'tencent-hy'
   | 'kimi'
   | 'kimi3'
   | 'xiaomi-mimo';
 
 export const MODEL_FAMILY_VALUES: TModelFamily[] = [
   'jev',
+  'ant-ling',
   'doubao-vision',
   'doubao-seed',
   'gemini',
@@ -432,6 +435,7 @@ export const MODEL_FAMILY_VALUES: TModelFamily[] = [
   'gpt-5',
   'gpt-6',
   'deepseek',
+  'tencent-hy',
   'kimi',
   'kimi3',
   'xiaomi-mimo',

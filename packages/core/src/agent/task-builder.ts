@@ -274,6 +274,7 @@ export class TaskBuilder {
           (result) => {
             param[field] = result;
           },
+          planType,
         );
         context.tasks.push(locateTask);
       } else {
@@ -500,6 +501,22 @@ export class TaskBuilder {
     const { match, operation, payload } = refAction;
     const refAct: RefActRecord = { ref: match.ref, operation };
     task.refAct = refAct;
+    if (this.interface.supportsRefOperation) {
+      const supported = await this.interface.supportsRefOperation(
+        match,
+        operation,
+        payload,
+        abortSignal,
+      );
+      abortSignal?.throwIfAborted();
+      if (!supported) {
+        // Nothing was sent: the interface cannot perform this operation on
+        // this element by ref, so the located point is used as usual.
+        refAct.fallback = 'coordinates';
+        refAct.declined = true;
+        return callByCoordinates();
+      }
+    }
     const receipt = await this.interface.actOnRef!(
       match,
       operation,
@@ -548,6 +565,8 @@ export class TaskBuilder {
     detailedLocateParam: DetailedLocateParam | string,
     context: PlanBuildContext,
     onResult?: (result: LocateResultElement) => void,
+    /** The action this locate serves, when it serves one (e.g. Input). */
+    forAction?: string,
   ): ExecutionTaskPlanningLocateApply {
     const { cacheable, locateModel, deepLocate } = context;
 
@@ -718,6 +737,7 @@ export class TaskBuilder {
             this.interface,
             treeQuery,
             abortSignal,
+            { forInput: forAction === 'Input' },
           );
           task.treeLocate = outcome.record;
           if (outcome.match) {

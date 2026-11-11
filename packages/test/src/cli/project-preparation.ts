@@ -1,5 +1,5 @@
-import { readdirSync } from 'node:fs';
-import { join, relative, resolve, sep } from 'node:path';
+import { readdirSync, realpathSync } from 'node:fs';
+import { isAbsolute, join, relative, resolve, sep } from 'node:path';
 import type { CollectedWorkflowDocument } from '@midscene/core/internal/test-runner';
 import { buildTestRunReportPlan } from '@midscene/core/internal/test-runner';
 import { globSync } from 'tinyglobby';
@@ -40,8 +40,22 @@ const toPosix = (value: string): string => value.split(sep).join('/');
 const discoverResolvedTestFiles = (
   projectRoot: string,
   selection: TestFileSelection,
+  excludedDirectories: readonly string[] = [],
 ): string[] => {
   const root = resolve(projectRoot);
+  const outputPatterns = excludedDirectories.flatMap((directory) => {
+    const withinRoot = relative(root, directory);
+    if (
+      !withinRoot ||
+      isAbsolute(withinRoot) ||
+      withinRoot === '..' ||
+      withinRoot.startsWith(`..${sep}`)
+    )
+      return [];
+    // Escape glob metacharacters: output paths are literal directories.
+    const literal = toPosix(withinRoot).replace(/([*?{}[\]()!])/g, '\\$1');
+    return [`${literal}/**`];
+  });
   const match = (patterns: readonly string[]) =>
     globSync(patterns, {
       absolute: true,
@@ -50,7 +64,11 @@ const discoverResolvedTestFiles = (
       dot: true,
       expandDirectories: false,
       followSymbolicLinks: false,
-      ignore: [...ALWAYS_IGNORED_PATTERNS, ...(selection.exclude ?? [])],
+      ignore: [
+        ...ALWAYS_IGNORED_PATTERNS,
+        ...outputPatterns,
+        ...(selection.exclude ?? []),
+      ],
       onlyFiles: true,
     }).filter((file) => /\.ya?ml$/i.test(file));
   const files = match(selection.include);
@@ -176,8 +194,27 @@ export async function prepareProject(
   const prerequisiteFile = options.prerequisiteFile
     ? resolve(options.prerequisiteFile)
     : undefined;
-  const mainFiles =
-    options.files ?? discoverResolvedTestFiles(projectRoot, fileSelection);
+  const discoveredFiles =
+    options.files ??
+    discoverResolvedTestFiles(
+      options.discoveryRoot ?? projectRoot,
+      fileSelection,
+      options.excludedDirectories,
+    );
+  const selectedPath = options.testPath
+    ? realpathSync(options.testPath)
+    : undefined;
+  const mainFiles = selectedPath
+    ? discoveredFiles.filter((file) => {
+        const within = relative(selectedPath, realpathSync(file));
+        return (
+          within === '' ||
+          (!isAbsolute(within) &&
+            within !== '..' &&
+            !within.startsWith(`..${sep}`))
+        );
+      })
+    : discoveredFiles;
   const files = [
     ...(prerequisiteFile ? [prerequisiteFile] : []),
     ...mainFiles.filter((file) => file !== prerequisiteFile),
@@ -199,7 +236,7 @@ export async function prepareProject(
   const plans: import('@midscene/core').TestRunReportDocumentPlan[] = [];
   let filteredCaseCount = 0;
 
-  if (sources.length === 0) {
+  if (sources.length === 0 && !options.testPath) {
     const error = asCollectionError(
       project.projectId,
       project.name,

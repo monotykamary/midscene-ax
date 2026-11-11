@@ -18,6 +18,7 @@ module.exports = {
     'node_modules',
     'pnpm-lock.yaml',
     'midscene_run',
+    'packages/web-integration/src/browser-harness/vendor',
   ],
   flagWords: banWords,
   dictionaries: ['dictionary'],
