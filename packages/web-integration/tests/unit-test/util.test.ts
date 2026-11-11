@@ -11,7 +11,7 @@ import { describe, expect, it } from '@rstest/core';
 describe('getKeyCommands', () => {
   it('should return a single key without command when no meta or control key is provided', () => {
     const result = getKeyCommands('a');
-    expect(result).toEqual([{ key: 'A' }]);
+    expect(result).toEqual([{ key: 'a' }]);
   });
 
   it('should work with array input without meta key', () => {

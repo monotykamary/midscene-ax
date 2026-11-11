@@ -42,7 +42,10 @@ import {
   judgeOrderSensitive,
   sanitizeXpaths,
 } from '../common/cache-helper';
-import { selectAllInputScript } from '../common/input-scripts';
+import {
+  focusedInputFrameScript,
+  selectAllInputScript,
+} from '../common/input-scripts';
 import {
   type KeyInput,
   type MouseButton,
@@ -88,6 +91,16 @@ type CdpNode = {
 type PageCdpSession = {
   send(method: string, params?: Record<string, unknown>): Promise<unknown>;
   detach(): Promise<void>;
+};
+
+// Narrow the different Playwright/Puppeteer generic overloads to the frame
+// operations needed for focus traversal, including cross-origin child frames.
+type FocusedInputFrame = {
+  evaluate(script: string): Promise<unknown>;
+  evaluateHandle(script: string): Promise<{
+    asElement(): { contentFrame(): Promise<FocusedInputFrame | null> } | null;
+    dispose(): Promise<void>;
+  }>;
 };
 
 type ScreencastCdpSession = PageCdpSession & {
@@ -209,7 +222,6 @@ export class Page<
   underlyingPage: InterfaceType;
   protected waitForNavigationTimeout: number;
   protected waitForNetworkIdleTimeout: number;
-  private viewportSize?: Size;
   private onBeforeInvokeAction?: AbstractInterface['beforeInvokeAction'];
   private onAfterInvokeAction?: AbstractInterface['afterInvokeAction'];
   private customActions?: DeviceAction<any>[];
@@ -521,16 +533,14 @@ export class Page<
   }
 
   async size(): Promise<Size> {
-    if (this.viewportSize) return this.viewportSize;
+    // Tabs and window sizes can change while this wrapper stays alive.
     /* istanbul ignore next -- closure is serialized to the browser realm via page.evaluate, where istanbul's cov_* counter does not exist */
-    const sizeInfo: Size = await this.evaluate(() => {
+    return this.evaluate(() => {
       return {
         width: window.innerWidth,
         height: window.innerHeight,
       };
     });
-    this.viewportSize = sizeInfo;
-    return sizeInfo;
   }
 
   async screenshotBase64(): Promise<string> {
@@ -1197,7 +1207,23 @@ export class Page<
 
   async selectAllInput(element?: ElementInfo): Promise<void> {
     if (!element) {
-      throw new Error('Bulk replace input requires a target element');
+      let frame: FocusedInputFrame = this.underlyingPage.mainFrame();
+      while (true) {
+        const handle = await frame.evaluateHandle(focusedInputFrameScript);
+        let child: FocusedInputFrame | null | undefined;
+        try {
+          child = await handle.asElement()?.contentFrame();
+        } finally {
+          await handle.dispose();
+        }
+        if (!child) break;
+        frame = child;
+      }
+      if (!(await frame.evaluate(selectAllInputScript))) {
+        // Never issue a page-level selectAll when no editable field owns focus.
+        throw new Error('Replacing text requires a focused editable field');
+      }
+      return;
     }
     await this.mouse.click(element.center[0], element.center[1]);
     const selected = await this.evaluate<boolean>(selectAllInputScript);
@@ -1226,8 +1252,25 @@ export class Page<
     }
   }
 
+  /** Stabilize root overscroll before wheel input without replacing an app's explicit policy. */
+  private async calmRootOverscroll(): Promise<void> {
+    try {
+      await this.evaluate(`(() => {
+        for (const el of [document.documentElement, document.body]) {
+          if (!el) continue;
+          const style = getComputedStyle(el);
+          if (style.overscrollBehaviorX === 'auto') el.style.overscrollBehaviorX = 'none';
+          if (style.overscrollBehaviorY === 'auto') el.style.overscrollBehaviorY = 'none';
+        }
+      })()`);
+    } catch (error) {
+      debugPage('calm root overscroll failed: %s', error);
+    }
+  }
+
   private everMoved = false;
   private async moveToPointBeforeScroll(point?: Point): Promise<void> {
+    await this.calmRootOverscroll();
     if (point) {
       await this.mouse.move(point.left, point.top);
     } else if (!this.everMoved) {
@@ -1391,49 +1434,36 @@ export class Page<
     to: { x: number; y: number },
     duration?: number,
   ) {
-    const LONG_PRESS_THRESHOLD = 500;
     const MIN_PRESS_THRESHOLD = 150;
     duration = duration || 100;
     if (duration < MIN_PRESS_THRESHOLD) {
       duration = MIN_PRESS_THRESHOLD;
     }
-    if (duration > LONG_PRESS_THRESHOLD) {
-      duration = LONG_PRESS_THRESHOLD;
-    }
+    // Preserve explicit slow gestures; a moving pointer is not a long press.
     debugPage(
       `mouse swipe from ${from.x}, ${from.y} to ${to.x}, ${to.y} with duration ${duration}ms`,
     );
 
-    if (this.interfaceType === 'puppeteer') {
-      const page = this.underlyingPage as PuppeteerPage;
-      await page.mouse.move(from.x, from.y);
-      await page.mouse.down({ button: 'left' });
-
+    const page = this.underlyingPage as PuppeteerPage | PlaywrightPage;
+    await page.mouse.move(from.x, from.y);
+    await page.mouse.down({ button: 'left' });
+    let completed = false;
+    try {
       const steps = 30;
-      const delay = duration / steps;
       for (let i = 1; i <= steps; i++) {
         const x = from.x + (to.x - from.x) * (i / steps);
         const y = from.y + (to.y - from.y) * (i / steps);
         await page.mouse.move(x, y);
-        await new Promise((resolve) => setTimeout(resolve, delay));
+        await sleep(duration / steps);
       }
-
-      await page.mouse.up({ button: 'left' });
-    } else if (this.interfaceType === 'playwright') {
-      const page = this.underlyingPage as PlaywrightPage;
-      await page.mouse.move(from.x, from.y);
-      await page.mouse.down();
-
-      const steps = 30;
-      const delay = duration / steps;
-      for (let i = 1; i <= steps; i++) {
-        const x = from.x + (to.x - from.x) * (i / steps);
-        const y = from.y + (to.y - from.y) * (i / steps);
-        await page.mouse.move(x, y);
-        await page.waitForTimeout(delay);
+      completed = true;
+    } finally {
+      if (completed) {
+        await page.mouse.up({ button: 'left' });
+      } else {
+        // Release best-effort without replacing the original movement error.
+        await page.mouse.up({ button: 'left' }).catch(() => {});
       }
-
-      await page.mouse.up({ button: 'left' });
     }
   }
   async longPress(x: number, y: number, duration?: number) {
@@ -1598,19 +1628,25 @@ export class Page<
         capturedError = error as Error;
       }
     };
-    session.on('Page.fileChooserOpened', this.puppeteerFileChooserHandler);
+    const listener = this.puppeteerFileChooserHandler;
+    session.on('Page.fileChooserOpened', listener);
+    let disposed = false;
     return {
       dispose: () => {
-        if (this.puppeteerFileChooserHandler) {
-          session.off(
-            'Page.fileChooserOpened',
-            this.puppeteerFileChooserHandler,
-          );
+        if (disposed) return;
+        disposed = true;
+        session.off('Page.fileChooserOpened', listener);
+        if (this.puppeteerFileChooserHandler === listener) {
+          this.puppeteerFileChooserHandler = undefined;
         }
-        void session.detach();
-        this.puppeteerFileChooserHandler = undefined;
-        if (this.puppeteerFileChooserSession === session) {
+        if (
+          this.puppeteerFileChooserSession === session &&
+          !this.puppeteerFileChooserHandler
+        ) {
           this.puppeteerFileChooserSession = undefined;
+          void session.detach().catch((error) => {
+            debugPage('failed to detach file chooser session: %s', error);
+          });
         }
       },
       getError: () => capturedError,
@@ -1618,11 +1654,31 @@ export class Page<
   }
 }
 
+const keepPopupPages = new WeakSet<object>();
+const foldedPopups = new WeakMap<object, { from: string; to: string }>();
+
+/** Opt in to retaining popup tabs instead of folding their URL into the parent. */
+export function setKeepPopups(
+  page: PuppeteerPage | PlaywrightPage,
+  keep: boolean,
+): void {
+  if (keep) keepPopupPages.add(page);
+  else keepPopupPages.delete(page);
+}
+
+/** Last successfully folded popup for this page; failed navigation is not recorded. */
+export function foldedPopupOf(
+  page: PuppeteerPage | PlaywrightPage,
+): { from: string; to: string } | undefined {
+  return foldedPopups.get(page);
+}
+
 export function forceClosePopup(
   page: PuppeteerPage | PlaywrightPage,
   debugProfile: DebugFunction,
 ) {
   page.on('popup', async (popup) => {
+    if (keepPopupPages.has(page)) return;
     if (!popup) {
       console.warn('got a popup event, but the popup is not ready yet, skip');
       return;
@@ -1640,6 +1696,7 @@ export function forceClosePopup(
     }
 
     if (!page.isClosed()) {
+      const from = page.url();
       try {
         // A target=_blank navigation (for example Baidu's Map link) is
         // redirected back into the preview tab. Waiting for the target page's
@@ -1650,6 +1707,7 @@ export function forceClosePopup(
           waitUntil: 'domcontentloaded',
           timeout: 10_000,
         });
+        foldedPopups.set(page, { from, to: url });
       } catch (error) {
         debugProfile(`failed to goto ${url}, error: ${error}`);
       }
