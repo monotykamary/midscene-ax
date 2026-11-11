@@ -20,9 +20,24 @@ const navigateParamSchema = z.object({
   url: z
     .string()
     .describe(
-      'The URL to navigate to. Must start with https://, file://, or a similar protocol.',
+      'A full URL (https://, file://, or a similar protocol), or a path resolved against the current web page.',
     ),
 });
+
+export async function resolveNavigateUrl(
+  page: Pick<AbstractWebPage, 'url'>,
+  target: string,
+): Promise<string> {
+  const raw = target.trim();
+  if (/^[a-z][a-z0-9+.-]*:/i.test(raw)) return raw;
+  const current = page.url ? await page.url() : '';
+  if (!/^https?:/i.test(current)) {
+    throw new Error(
+      `Navigate needs a full URL: "${raw}" is a path and the current page (${current || 'unknown'}) has no web address to resolve it against`,
+    );
+  }
+  return new URL(raw, current).toString();
+}
 
 function normalizeKeyInputs(value: string | string[]): string[] {
   const inputs = Array.isArray(value) ? value : [value];
@@ -67,6 +82,10 @@ function normalizeKeyInputs(value: string | string[]): string[] {
 export function getKeyCommands(
   value: string | string[],
 ): Array<{ key: string; command?: string }> {
+  // Preserve the actual key for a lone character; modifier combinations still use the layout map.
+  if (typeof value === 'string' && value.trim().length === 1) {
+    return [{ key: value.trim() }];
+  }
   const keys = normalizeKeyInputs(value);
 
   return keys.reduce((acc: Array<{ key: string; command?: string }>, k) => {
@@ -733,6 +752,10 @@ export function createWebInputPrimitives(
         await page.mouse.click(x, y, { button: 'left' });
         scheduleVisualUpdate();
       },
+      middleClick: async ({ x, y }) => {
+        await page.mouse.click(x, y, { button: 'middle' });
+        scheduleVisualUpdate();
+      },
       rightClick: async ({ x, y }) => {
         await page.mouse.click(x, y, { button: 'right' });
         scheduleVisualUpdate();
@@ -800,6 +823,10 @@ export function createWebInputPrimitives(
             button: 'left',
           });
           await page.keyboard.press([{ key: 'End' }]);
+        } else if (!element && opts?.replace !== false && !opts?.focusOnly) {
+          // Replace within the current focus without a preliminary click or
+          // a separate empty input event that could trigger an autosave.
+          await page.selectAllInput();
         }
 
         if (opts?.focusOnly) {
@@ -938,7 +965,7 @@ export const commonWebActionsForWebPage = <T extends AbstractWebPage>(
             'Navigate operation is not supported on this page type',
           );
         }
-        await page.navigate(param.url);
+        await page.navigate(await resolveNavigateUrl(page, param.url));
         scheduleWebVisualUpdate(page, true);
       },
     }),

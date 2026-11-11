@@ -1,4 +1,5 @@
 import { Agent } from '@/agent';
+import type { AgentReportManager } from '@/agent/agent-report-manager';
 import { trackResourceOperation } from '@/test-runner';
 import type { ExecutionDump, ReportMeta } from '@/types';
 import {
@@ -23,7 +24,7 @@ function createMockInterface() {
     describe: () => 'test page',
     size: async () => ({ width: 1280, height: 720 }),
     screenshotBase64: async () =>
-      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR4nGNgYAAAAAMAASsJTYQAAAAASUVORK5CYII=',
+      'data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAACXBIWXMAAAPoAAAD6AG1e1JrAAAADUlEQVQImWNgYGD4DwABBAEAfbLI3wAAAABJRU5ErkJggg==',
   } as any;
 }
 
@@ -35,6 +36,48 @@ function createLargeBase64DataUri(byteSize: number): string {
 describe('Agent dump update screenshot serialization', () => {
   afterEach(() => {
     rs.clearAllMocks();
+  });
+
+  it('records snapshots without serializing the accumulated dump when nobody subscribes', async () => {
+    const agent = new Agent(createMockInterface(), {
+      modelConfig,
+      generateReport: false,
+    });
+    const reports = (agent as any).reportManager as AgentReportManager;
+    const serialize = rs.spyOn(reports, 'dumpDataString');
+    const reportGeneratorStub = {
+      onExecutionUpdate: rs.fn(),
+      flush: rs.fn(async () => {}),
+      finalize: rs.fn(async () => undefined),
+      getReportPath: rs.fn(() => undefined),
+    };
+    (agent as any).reportManager.reportState.generator = reportGeneratorStub;
+
+    try {
+      const names = ['first', 'second', 'third'];
+      for (const name of names) {
+        await agent.recordToReport(name, { content: name });
+      }
+
+      expect(serialize).not.toHaveBeenCalled();
+      expect(reportGeneratorStub.onExecutionUpdate).toHaveBeenCalledTimes(3);
+      expect(reportGeneratorStub.flush).toHaveBeenCalledTimes(3);
+      expect(
+        reportGeneratorStub.onExecutionUpdate.mock.calls.map(
+          ([execution]) => (execution as ExecutionDump).name,
+        ),
+      ).toEqual(names.map((name) => `Log - ${name}`));
+
+      // Skipping an unused callback payload must not discard report entries.
+      const exported = JSON.parse(agent.dumpDataString());
+      expect(
+        exported.executions.map((entry: { name: string }) => entry.name),
+      ).toEqual(names.map((name) => `Log - ${name}`));
+      expect(serialize).toHaveBeenCalledTimes(1);
+    } finally {
+      serialize.mockRestore();
+      await agent.destroy();
+    }
   });
 
   it('waits for tracked Runner operations before destroying its interface', async () => {

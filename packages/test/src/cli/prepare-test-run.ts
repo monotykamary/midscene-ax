@@ -1,6 +1,10 @@
 import { randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, statSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
+import {
+  resolveMidsceneRunDir,
+  runWithMidsceneRunDir,
+} from '@midscene/shared/common';
 import { NativeWorkflowFormatError } from '../parser/collect';
 import type {
   PreparedExecutionProject,
@@ -38,28 +42,45 @@ const assertDirectory = (path: string, label: string): void => {
   }
 };
 
-const resolveRunInput = (options: TestProjectRunOptions): TestRunInput => {
+export const resolveRunInput = (
+  options: Pick<
+    TestProjectRunOptions,
+    'cwd' | 'projectRoot' | 'configPath' | 'testPath'
+  >,
+): TestRunInput => {
   const cwd = resolve(options.cwd ?? process.cwd());
   assertDirectory(cwd, 'Test working directory');
-  const inputPath = options.projectRoot
-    ? resolve(cwd, options.projectRoot)
-    : undefined;
-  const singleFile =
-    inputPath && existsSync(inputPath) && statSync(inputPath).isFile()
-      ? inputPath
-      : undefined;
-  if (singleFile && !/\.ya?ml$/i.test(singleFile))
+  const searchRoot = resolve(cwd, options.projectRoot ?? '.');
+  assertDirectory(searchRoot, 'Test project directory');
+  const configPath = options.configPath
+    ? resolve(cwd, options.configPath)
+    : discoverTestConfig(searchRoot);
+  if (options.configPath && /\.ya?ml$/i.test(configPath!)) {
     throw new Error(
-      `Test input must be a YAML file or project directory: ${singleFile}`,
+      `midscene-test --config only accepts a native TypeScript or JavaScript project config: ${configPath}. Run legacy batch YAML with \`midscene --config ${options.configPath}\`.`,
     );
-  const cliProjectRoot = singleFile ? dirname(singleFile) : inputPath;
-  if (cliProjectRoot) assertDirectory(cliProjectRoot, 'Test project directory');
-  const projectRoot = cliProjectRoot ?? cwd;
+  }
+  if (configPath && (!existsSync(configPath) || !statSync(configPath).isFile()))
+    throw new Error(
+      `Midscene config does not exist or is not a file: ${configPath}`,
+    );
+  const testPath = options.testPath
+    ? resolve(cwd, options.testPath)
+    : undefined;
+  if (testPath) {
+    if (!existsSync(testPath))
+      throw new Error(`Test path does not exist: ${testPath}`);
+    const stat = statSync(testPath);
+    if (!stat.isDirectory() && !(stat.isFile() && /\.ya?ml$/i.test(testPath)))
+      throw new Error(
+        `Test input must be a YAML file or directory: ${testPath}`,
+      );
+  }
   return {
     cwd,
-    projectRoot,
-    configSearchRoot: projectRoot,
-    ...(singleFile ? { singleFile } : {}),
+    projectRoot: configPath ? dirname(configPath) : searchRoot,
+    ...(configPath ? { configPath } : {}),
+    ...(testPath ? { testPath } : {}),
   };
 };
 
@@ -70,61 +91,85 @@ export async function prepareTestRun(
   const startedAt = new Date();
   const runId = createTestRunId(startedAt);
   const input = resolveRunInput(options);
-  const configPath = options.configPath
-    ? resolve(input.configSearchRoot, options.configPath)
-    : discoverTestConfig(input.configSearchRoot);
-  if (options.configPath && /\.ya?ml$/i.test(configPath!)) {
-    throw new Error(
-      `midscene-test --config only accepts a native TypeScript or JavaScript project config: ${configPath}. Run legacy batch YAML with \`midscene --config ${options.configPath}\`.`,
-    );
-  }
-  if (options.configPath && !existsSync(configPath!))
-    throw new Error(`Midscene config does not exist: ${configPath}`);
+  const { configPath } = input;
+  const standalonePath = configPath ? undefined : input.testPath;
+  const discovery =
+    standalonePath && statSync(standalonePath).isFile()
+      ? { files: [standalonePath] }
+      : { discoveryRoot: standalonePath };
   const definition = await loadTestProject<unknown>(configPath);
-  const resultDir = options.resultDir
-    ? resolve(input.cwd, options.resultDir)
-    : join(input.projectRoot, '.midscene', 'test-results');
-  const runDir = join(resultDir, runId);
-  const summaryPath = join(runDir, 'summary.json');
-  const reportDir = resolve(input.projectRoot, definition.output.reportDir);
-  mkdirSync(resultDir, { recursive: true });
-  mkdirSync(runDir);
-  const projects: PreparedExecutionProject[] = [];
-  for (const project of selectProjects(
-    definition.projects,
-    options.projectNames,
-  ))
-    projects.push(
-      await prepareProject(
-        project,
-        input.projectRoot,
-        runDir,
-        definition.test.testTimeout,
-        input.singleFile ? { files: [input.singleFile] } : undefined,
+  const artifactDir = resolveMidsceneRunDir(input.projectRoot);
+  return runWithMidsceneRunDir(artifactDir, async () => {
+    const resultDir = options.resultDir
+      ? resolve(input.cwd, options.resultDir)
+      : join(artifactDir, 'test-results');
+    const runDir = join(resultDir, runId);
+    const summaryPath = join(runDir, 'summary.json');
+    const reportDir = definition.output.reportDir
+      ? resolve(input.projectRoot, definition.output.reportDir)
+      : join(artifactDir, 'report');
+    mkdirSync(resultDir, { recursive: true });
+    mkdirSync(runDir);
+    const projects: PreparedExecutionProject[] = [];
+    for (const project of selectProjects(
+      definition.projects,
+      options.projectNames,
+    ))
+      projects.push(
+        await prepareProject(
+          project,
+          input.projectRoot,
+          runDir,
+          definition.test.testTimeout,
+          {
+            testPath: input.testPath,
+            ...discovery,
+            excludedDirectories: [
+              artifactDir,
+              resultDir,
+              reportDir,
+              ...['cache', 'log', 'output', 'tmp', 'dump'].map((name) =>
+                join(artifactDir, name),
+              ),
+            ],
+          },
+        ),
+      );
+    if (
+      input.testPath &&
+      projects.every(
+        (project) =>
+          project.selectedCaseCount === 0 &&
+          project.collectionErrors.length === 0,
+      )
+    )
+      throw new Error(
+        `No test cases match "${input.testPath}" in ${input.projectRoot}. Check --project, files.include/files.exclude, tags, and ignored output directories.`,
+      );
+    const hasFormatMismatch = projects.some((project) =>
+      project.collectionErrors.some(
+        ({ error }) => error instanceof NativeWorkflowFormatError,
       ),
     );
-  const hasFormatMismatch = projects.some((project) =>
-    project.collectionErrors.some(
-      ({ error }) => error instanceof NativeWorkflowFormatError,
-    ),
-  );
-  return {
-    startedAt,
-    runId,
-    projectRoot: input.projectRoot,
-    ...(configPath ? { configPath } : {}),
-    resultDir,
-    runDir,
-    summaryPath,
-    reportDir,
-    definition,
-    projects,
-    // A wrong-format file invalidates the complete command invocation. Other
-    // native collection failures retain the existing per-Project isolation.
-    preflightScope: hasFormatMismatch ? 'run' : 'project',
-    reportEnabled: true,
-    publications: [],
-    onProgress: options.onProgress ?? (() => {}),
-    onEvent: options.onEvent,
-  };
+    return {
+      startedAt,
+      runId,
+      projectRoot: input.projectRoot,
+      artifactDir,
+      ...(configPath ? { configPath } : {}),
+      resultDir,
+      runDir,
+      summaryPath,
+      reportDir,
+      definition,
+      projects,
+      // A wrong-format file invalidates the complete command invocation. Other
+      // native collection failures retain the existing per-Project isolation.
+      preflightScope: hasFormatMismatch ? 'run' : 'project',
+      reportEnabled: true,
+      publications: [],
+      onProgress: options.onProgress ?? (() => {}),
+      onEvent: options.onEvent,
+    };
+  });
 }
