@@ -347,6 +347,42 @@ These are the optional methods that you can implement:
 - `beforeInvokeAction?(actionName: string, param: any): Promise<void>`: a hook function before invoking an action in action space
 - `afterInvokeAction?(actionName: string, param: any): Promise<void>`: a hook function after invoking an action
 
+#### Accessibility tree contract (optional)
+
+If your interface can read its accessibility tree (DOM accessibility, Android UI hierarchy, iOS WDA source, macOS AX, Windows UIA), implement these three methods so Midscene addresses elements through the tree and uses the model only when the tree cannot decide. The tree is the address space for actions; vision (AI locate) is the fallback.
+
+```ts
+import type {
+  ActReceipt,
+  Perceivability,
+  RefOperation,
+  TreeMatch,
+  TreeQuery,
+} from '@midscene/core';
+
+class MyInterface extends AbstractInterface {
+  // Return every element that matches; Midscene decides what to do with them.
+  async locateInTree(query: TreeQuery, signal?: AbortSignal): Promise<TreeMatch[]> { /* ... */ }
+  // Act once on the element the ref names and say what happened.
+  async actOnRef(match: TreeMatch, operation: RefOperation, payload?: string, signal?: AbortSignal): Promise<ActReceipt> { /* ... */ }
+  // Whether a user could see the element. Optional if matches carry `perceivable`.
+  async perceivable(match: TreeMatch, signal?: AbortSignal): Promise<Perceivability> { /* ... */ }
+}
+```
+
+- A `TreeQuery` is either `{ ref }` (an opaque handle from a snapshot or an earlier match) or `{ role?, name, exact?, context? }`. `TreeMatch.rect` uses the same logical coordinates as `size()`.
+- **Locating.** Midscene tries, in order: coordinates returned by the planner, `xpath`, **the tree**, the locate cache, then AI locate. The tree query comes from the `tree` locate option (for example `agent.aiTap('Log in', { tree: { role: 'button', name: 'Log in' } })`). Without it, a plain-string prompt is tried as an exact accessible name, with whitespace normalised. Midscene never derives a looser query from a sentence.
+- **Exactly one, or abstain.** The tree answers only when `locateInTree` returns exactly one match and that match is not reported as hidden (by `match.perceivable` or `perceivable()`). No match, several matches, a hidden match or an error all fall through to the cache and AI locate. The task records why in `task.treeLocate`, and a tree hit is reported as `hitBy.from: 'Accessibility tree'`. Tree hits do not write the locate cache.
+- **Acting.** When an element came from the tree, `Tap`, `DoubleClick`, `RightClick`, `Hover`, `ClearInput`, `KeyboardPress` with a target, and `Input` in `replace` or `clear` mode call `actOnRef` instead of acting at coordinates. Other actions and options keep the coordinate path. The receipt is stored on the task as `task.receipt`:
+  - `executed`: done; `verified` is kept as returned.
+  - `stale`: the ref no longer names a live element, so Midscene runs the action once at coordinates and records `refAct.fallback: 'coordinates'`.
+  - `blocked`: Midscene throws with the receipt's `reason` and does not retry at coordinates.
+  - `outcome_unknown`: recorded with `verified` never `true`, and the next planning round is told to check the screen.
+- **Declining an operation.** If `actOnRef` can perform only some operations (for example, a harness with no guarded hover or double click), also implement `supportsRefOperation(match, operation, payload?, signal?): Promise<boolean>`. When it returns `false`, Midscene does not call `actOnRef`, acts at the located coordinates, and records `refAct.declined: true`. A refusal that depends on the element's state (disabled, covered) is not a reason to decline: return a `blocked` receipt so the reason reaches the step.
+- **Rebinding a stale ref.** Before answering `stale`, an interface may act on the one element with the same identity in a fresh tree; it reports that as `receipt.rebound: { from, to }`. See [browser-harness-js](./integrate-with-browser-harness) for a web interface that does this.
+
+Interfaces without these methods behave exactly as before.
+
 ### The action space
 
 Action space is the set of actions that can be performed on the interface. AI model will use these actions to perform the actions. All the descriptions and parameter schemas of the actions will be provided to the AI model.

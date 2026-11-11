@@ -1,7 +1,9 @@
 import { isBboxLocateResultValue } from './types';
-import type { LocateResultValue } from './types';
+import type { LocateResultValue, ParsedLocateResultValue } from './types';
 
-export function assertLocateResultStructure(result: LocateResultValue): void {
+export function assertLocateResultStructure(
+  result: ParsedLocateResultValue,
+): void {
   if (!result || typeof result !== 'object') {
     throw new Error(
       `invalid parsed locate result: expected object, got ${JSON.stringify(
@@ -42,17 +44,26 @@ export function assertLocateResultStructure(result: LocateResultValue): void {
 
   if (
     coordinatesMeta.boundsType !== undefined &&
-    !['inclusive', 'edges'].includes(coordinatesMeta.boundsType)
+    !['closed', 'left-closed-right-open'].includes(coordinatesMeta.boundsType)
   ) {
     throw new Error(
       `invalid locate ${coordinatesMeta.shape} boundsType: ${coordinatesMeta.boundsType}`,
     );
   }
-  const { order, normalizedBy, rounding } = coordinatesMeta;
-  if (!['round', 'trunc', 'none'].includes(rounding)) {
+  const { order, normalizedBy, rounding, normalizationBasis } = coordinatesMeta;
+  if (
+    normalizationBasis !== undefined &&
+    !['image-size', 'last-pixel'].includes(normalizationBasis)
+  ) {
+    throw new Error(`invalid normalization basis: ${normalizationBasis}`);
+  }
+  if (
+    rounding !== undefined &&
+    !['round', 'trunc', 'none'].includes(rounding)
+  ) {
     throw new Error(`invalid locate coordinate rounding: ${rounding}`);
   }
-  if (order !== 'xy' && order !== 'yx') {
+  if (order !== undefined && order !== 'xy' && order !== 'yx') {
     throw new Error(
       `invalid locate coordinate order: ${JSON.stringify(order)}`,
     );

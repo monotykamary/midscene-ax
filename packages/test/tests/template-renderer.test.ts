@@ -7,7 +7,7 @@ import {
 } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, resolve } from 'node:path';
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from '@rstest/core';
 import {
   type TemplateEntry,
   loadTemplateManifest,
@@ -60,7 +60,7 @@ describe('template catalog', () => {
     expect(files['nodes/todo.ts'].toString()).toContain('todomvc.com');
     expect(files['nodes/todo.ts'].toString()).toContain('todo.captureState');
     expect(files['.gitignore'].toString()).toBe(
-      'node_modules/\n.env\nmidscene_run/\n.midscene/test-results/\n',
+      'node_modules/\n.env\nmidscene_run/\n',
     );
     expect(files.gitignore).toBeUndefined();
     for (const filename of ['README.md', 'README.zh.md', '.env.example']) {
