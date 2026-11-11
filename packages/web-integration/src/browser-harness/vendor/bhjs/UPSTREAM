@@ -6,6 +6,7 @@ License:  MIT (LICENSE in this directory)
 
 Files: browser.ts chrome.ts extension-hub.ts generated.ts interaction.ts page.ts
        session.ts snapshot.ts wire.ts ws-server.ts
+Fork-only: navigation-state.ts (Page.goto settles on the requested document's DOMContentLoaded, not load).
 Not vendored: recording.ts (the rrweb DOM tape), tests, gen.ts, repl.ts, the protocol JSON.
 
 Historical vendor baseline: the guard patches this directory used to carry (transparent native controls, the sensitive-field
@@ -18,3 +19,7 @@ SELECT_ALL_MODIFIER are exported from interaction.ts, so @midscene/web/browser-h
 
 Keep this directory out of the formatter and linter (biome.json files.ignore) so it stays byte-comparable with
 upstream.
+
+Fork-local changes past that baseline: ScopeBinding carries the authored targetRole/targetName/targetExact and
+Page.perform refuses a resolved node that is no longer that target (scope_target_mismatch) before dispatch; refusal
+descriptions withhold sensitive and masked text under the grant; goto waits for document readiness.
