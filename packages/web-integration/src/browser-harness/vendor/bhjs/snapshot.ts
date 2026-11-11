@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
-import type { Accessibility } from './generated.ts';
+import type { Accessibility } from './generated.js';
+import type { ScopeBinding } from './interaction.js';
 
 export type AXNode = Accessibility.AXNode;
 export type SnapshotOptions = {
@@ -16,6 +17,9 @@ export type SnapshotRef = {
   frame: SnapshotFrame;
   backendNodeId: number;
   identity: string;
+  /** Full AX ancestry, independent of target value/focus and rendered-tree flattening. */
+  ancestorIdentity: string;
+  scopeBinding?: ScopeBinding;
   role: string;
   name: string;
   context?: string;
@@ -54,15 +58,57 @@ export function nodeIdentity(node: AXNode): string {
 }
 
 export const MISSING_SUBTREE = 'Snapshot subtree is missing or ambiguous';
-
-/** The largest `maxChars` a snapshot accepts. */
 export const MAX_SNAPSHOT_CHARS = 1_000_000;
+
+/** Build once per full AX tree; ignored and unrendered ancestors still bind a ref to its place. */
+export function snapshotAncestry(nodes: AXNode[]): (node: AXNode) => { ancestorIdentity: string; scopeBinding?: ScopeBinding } {
+  const byId = new Map(nodes.map(node => [node.nodeId, node]));
+  const parents = new Map<string, AXNode>();
+  const byBackend = new Map(nodes.filter(node => node.backendDOMNodeId).map(node => [node.backendDOMNodeId!, node]));
+  for (const node of nodes) for (const child of node.childIds ?? []) if (!parents.has(child)) parents.set(child, node);
+  const editable = (node: AXNode) => ['textbox', 'searchbox', 'spinbutton', 'combobox', 'slider', 'gridcell'].includes(roleOf(node)) || !!properties(node).editable;
+  const hasEditor = (root: AXNode): boolean => {
+    const pending = [root], seen = new Set<string>();
+    while (pending.length) {
+      const node = pending.pop()!;
+      if (seen.has(node.nodeId)) continue;
+      seen.add(node.nodeId);
+      if (editable(node)) return true;
+      for (const id of node.childIds ?? []) { const child = byId.get(id); if (child) pending.push(child); }
+    }
+    return false;
+  };
+  // Content-derived row/cell names incorporate edited values. Only authored naming
+  // sources may constrain ancestry; identity/role still bind every other ancestor.
+  const stableName = (node: AXNode): string => {
+    const source = node.name?.sources?.find(source => !source.invalid && !source.superseded && normalize(source.value?.value));
+    if (!source) return '';
+    if (source.attribute === 'aria-label' || source.attribute === 'title') return nameOf(node);
+    if (source.attribute !== 'aria-labelledby' && !['legend', 'tablecaption', 'title', 'label', 'labelfor', 'labelwrapped'].includes(source.nativeSource ?? '')) return '';
+    const related = source.attributeValue?.relatedNodes ?? source.nativeSourceValue?.relatedNodes ?? source.value?.relatedNodes ?? [];
+    if (!related.length || related.some(ref => { const named = byBackend.get(ref.backendDOMNodeId); return !named || hasEditor(named); })) return '';
+    return nameOf(node);
+  };
+  return node => {
+    const lineage: AXNode[] = [], seen = new Set([node.nodeId]);
+    for (let parent = (node.parentId && byId.get(node.parentId)) || parents.get(node.nodeId); parent; parent = (parent.parentId && byId.get(parent.parentId)) || parents.get(parent.nodeId)) {
+      if (seen.has(parent.nodeId)) throw new Error('AX ancestry cycle');
+      seen.add(parent.nodeId); lineage.push(parent);
+    }
+    const root = lineage.find(parent => !parent.ignored && parent.backendDOMNodeId && stableName(parent) && !ACTIONS.has(roleOf(parent)) && roleOf(parent) !== 'RootWebArea');
+    const owner = lineage.find(parent => parent.backendDOMNodeId && roleOf(parent) !== 'RootWebArea');
+    return {
+      ancestorIdentity: createHash('sha256').update(JSON.stringify(lineage.map(parent => [parent.backendDOMNodeId ?? parent.nodeId, roleOf(parent), stableName(parent)]))).digest('hex'),
+      ...(root ? { scopeBinding: { kind: 'semantic' as const, rootBackendNodeId: root.backendDOMNodeId!, role: roleOf(root), name: stableName(root) } } : owner ? { scopeBinding: { kind: 'identity' as const, rootBackendNodeId: owner.backendDOMNodeId! } } : {}),
+    };
+  };
+}
 
 export function snapshotLimits(options: SnapshotOptions): { maxDepth: number; maxChars: number } {
   const maxDepth = options.maxDepth ?? 50;
   const maxChars = options.maxChars ?? 50_000;
   if (!Number.isInteger(maxDepth) || maxDepth < 0 || maxDepth > 100) throw new Error('maxDepth must be 0..100');
-  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > MAX_SNAPSHOT_CHARS) throw new Error(`maxChars must be 1..${MAX_SNAPSHOT_CHARS}`);
+  if (!Number.isInteger(maxChars) || maxChars < 1 || maxChars > 1_000_000) throw new Error('maxChars must be 1..1000000');
   if (options.ref !== undefined && options.selector !== undefined) throw new Error('Choose ref or selector, not both');
   return { maxDepth, maxChars };
 }
@@ -81,7 +127,7 @@ export function renderAX(
   const roots = rootBackendId === undefined
     ? [...byId.values()].filter(n => !childIds.has(n.nodeId))
     : [...byId.values()].filter(n => n.backendDOMNodeId === rootBackendId);
-  if (rootBackendId !== undefined && roots.length !== 1) throw new Error(MISSING_SUBTREE);
+  if (rootBackendId !== undefined && roots.length !== 1) throw new Error('Snapshot subtree is missing or ambiguous');
   if (nodes.length && !roots.length) throw new Error('AX tree has no root');
   type View = { node: AXNode; role: string; name: string; children: View[]; text?: string; sensitive: boolean };
   const visited = new Set<string>();

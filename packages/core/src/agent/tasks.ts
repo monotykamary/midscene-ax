@@ -19,6 +19,7 @@ import type {
 } from '@/task-runner';
 import { TaskExecutionError } from '@/task-runner';
 import type {
+  ActionExecutionSuspension,
   AiActEffort,
   AiActProgressData,
   AiActProgressPhase,
@@ -66,6 +67,7 @@ import { parsePrompt } from './utils';
 
 interface ExecutionResult<OutputType = any> {
   output: OutputType;
+  suspension?: ActionExecutionSuspension;
   thought?: string;
   runner: TaskRunner;
 }
@@ -93,7 +95,36 @@ const maxErrorCountAllowedInOnePlanningLoop = 5;
 // Cap planning feedback by default so a large action output (e.g. a long adb
 // shell stdout) cannot blow up the next planning request's context. Actions
 // that require lossless structured feedback can explicitly choose their limit.
-const maxPlanningFeedbackLength = 500;
+const maxPlanningFeedbackLength = 2000;
+
+function isSuspensionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; cause?: { code?: unknown } };
+  const codes = [
+    'ACTION_EXECUTION_ABORTED',
+    'ACTION_EXECUTION_SUSPENDED',
+    'NATIVE_DIALOG_OBSERVATION_INTERRUPTED',
+  ];
+  return (
+    codes.includes(value.code as string) ||
+    codes.includes(value.cause?.code as string)
+  );
+}
+
+function createActionExecutionSuspendedError(
+  suspension?: ActionExecutionSuspension,
+): Error & { code: string; suspension?: ActionExecutionSuspension } {
+  const error = new Error(
+    'Action execution suspended; continuation is externally owned',
+  ) as Error & { code: string; suspension?: ActionExecutionSuspension };
+  error.name = 'ActionExecutionSuspendedError';
+  error.code =
+    suspension?.commandPending === false
+      ? 'NATIVE_DIALOG_OBSERVATION_INTERRUPTED'
+      : 'ACTION_EXECUTION_SUSPENDED';
+  error.suspension = suspension;
+  return error;
+}
 
 function truncatePlanningFeedback(
   feedback: string,
@@ -429,6 +460,9 @@ export class TaskExecutor {
       { abortSignal },
     );
     const result = await session.appendAndRun(tasks);
+    if (runner.isSuspended()) {
+      throw createActionExecutionSuspendedError(result?.suspension);
+    }
     const { output } = result ?? {};
     return {
       output,
@@ -453,6 +487,7 @@ export class TaskExecutor {
       | {
           yamlFlow?: MidsceneYamlFlowItem[]; // for cache use
           output?: string;
+          suspension?: ActionExecutionSuspension;
         }
       | undefined
     >
@@ -524,6 +559,7 @@ export class TaskExecutor {
       | {
           yamlFlow?: MidsceneYamlFlowItem[]; // for cache use
           output?: string;
+          suspension?: ActionExecutionSuspension;
         }
       | undefined
     >
@@ -857,6 +893,15 @@ export class TaskExecutor {
         },
       );
 
+      if (runner.isSuspended()) {
+        const suspension = result?.suspension;
+        await this.emitAiActProgress('suspended', {
+          planIndex,
+          planLimit: replanningCycleLimit,
+          ...(suspension ? { suspension } : {}),
+        });
+        return { output: { suspension }, runner, suspension };
+      }
       const planResult = result?.output as PlanningAIResponse | undefined;
       latestPlanResult = planResult;
 
@@ -908,7 +953,16 @@ export class TaskExecutor {
           (phase, data) => this.emitAiActProgress(phase, data),
         );
         try {
-          await session.appendAndRun(executables.tasks);
+          const actionResult = await session.appendAndRun(executables.tasks);
+          if (runner.isSuspended()) {
+            const suspension = actionResult?.suspension;
+            await this.emitAiActProgress('suspended', {
+              planIndex,
+              planLimit: replanningCycleLimit,
+              ...(suspension ? { suspension } : {}),
+            });
+            return { output: { suspension }, runner, suspension };
+          }
           this.setPendingFeedbackMessage(
             conversationHistory,
             initialTimeString,
@@ -917,6 +971,8 @@ export class TaskExecutor {
             ),
           );
         } catch (error: any) {
+          // Suspensions are externally owned interruptions, never planning failures.
+          if (runner.isSuspended() || isSuspensionError(error)) throw error;
           // A completed action must not be replayed because readiness failed.
           if (isActionReadinessError(error)) throw error;
           // errorFlag = true;

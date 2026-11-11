@@ -16,6 +16,7 @@ import type { WorkflowExecutionRecord } from '../test-runner/execution-record';
 // index.ts -> agent/index.ts -> agent/agent.ts -> index.ts
 import {
   type AIUsageInfo,
+  type ActionExecutionSuspension,
   type ActionParam,
   type ActionReturn,
   type AgentAIContextKey,
@@ -134,6 +135,20 @@ import {
 
 const debug = getDebug('agent');
 const warn = getDebug('agent', { console: true });
+
+function isSuspensionError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false;
+  const value = error as { code?: unknown; cause?: { code?: unknown } };
+  const codes = [
+    'ACTION_EXECUTION_ABORTED',
+    'ACTION_EXECUTION_SUSPENDED',
+    'NATIVE_DIALOG_OBSERVATION_INTERRUPTED',
+  ];
+  return (
+    codes.includes(value.code as string) ||
+    codes.includes(value.cause?.code as string)
+  );
+}
 
 class AgentScopedModelConfigManager extends ModelConfigManager {
   constructor(
@@ -1266,14 +1281,14 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
   async aiAct(
     taskPrompt: TUserPrompt,
     opt?: AiActOptions,
-  ): Promise<string | undefined> {
+  ): Promise<string | ActionExecutionSuspension | undefined> {
     return this.withReportOperation(() => this.executeAiAct(taskPrompt, opt));
   }
 
   private async executeAiAct(
     taskPrompt: TUserPrompt,
     opt?: AiActOptions,
-  ): Promise<string | undefined> {
+  ): Promise<string | ActionExecutionSuspension | undefined> {
     const internalOptions = opt as AiActInternalOptions | undefined;
     const internalReportDisplay = internalOptions?._internalReportDisplay;
     const taskPromptText =
@@ -1381,7 +1396,8 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
         } catch (error) {
           if (
             error instanceof YamlExecutionOwnershipError ||
-            isActionReadinessError(error)
+            isActionReadinessError(error) ||
+            isSuspensionError(error)
           )
             throw error;
           abortSignal?.throwIfAborted();
@@ -1408,6 +1424,8 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
         abortSignal,
         internalReportDisplay,
       );
+
+      if (actionOutput?.suspension) return actionOutput.suspension;
 
       // update cache
       if (this.taskCache && cacheable !== false) {
@@ -1449,7 +1467,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
       : undefined;
     let aiActError: { error: unknown } | undefined;
     let fileChooserHandlingError: Error | undefined;
-    let result: string | undefined;
+    let result: string | ActionExecutionSuspension | undefined;
     try {
       if (fileChooserAccept?.length) {
         if (!fileChooserAccepter) {
@@ -1484,7 +1502,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
   async runMarkdown(
     markdownPath: string,
     opt?: AiActOptions,
-  ): Promise<string | undefined> {
+  ): Promise<string | ActionExecutionSuspension | undefined> {
     return this.withReportOperation(() =>
       this.executeMarkdown(markdownPath, opt),
     );
@@ -1493,7 +1511,7 @@ export class Agent<InterfaceType extends AbstractInterface = AbstractInterface>
   private async executeMarkdown(
     markdownPath: string,
     opt?: AiActOptions,
-  ): Promise<string | undefined> {
+  ): Promise<string | ActionExecutionSuspension | undefined> {
     const markdown = await readFile(markdownPath, 'utf-8');
     const { prompt } = await markdownToAiActPrompt(markdown, markdownPath);
     return this.aiAct(prompt, {

@@ -17,7 +17,10 @@ import type { ExecutionTask, TestStatus } from '../types';
  * variants (which carry extra fields) satisfy it.
  */
 export type TaskStatusFields = Partial<
-  Pick<ExecutionTask, 'status' | 'subType' | 'error' | 'errorMessage'> & {
+  Pick<
+    ExecutionTask,
+    'status' | 'subType' | 'error' | 'errorMessage' | 'observationSuspension'
+  > & {
     // `output` is only ever compared to `false`; keep it `unknown` rather than
     // the picked generic `any` so the field stays type-safe for callers.
     output: unknown;
@@ -30,7 +33,8 @@ export type DerivedTaskStatus =
   | 'warning'
   | 'pending'
   | 'running'
-  | 'cancelled';
+  | 'cancelled'
+  | 'suspended';
 
 /**
  * Derive a single task's semantic status from its raw dump fields. Mirrors the
@@ -65,6 +69,7 @@ export function deriveTaskStatus(task: TaskStatusFields): DerivedTaskStatus {
   if (task.status === 'pending') return 'pending';
   if (task.status === 'running') return 'running';
   if (task.status === 'cancelled') return 'cancelled';
+  if (task.status === 'suspended') return 'suspended';
 
   // finished, no error
   return 'passed';
@@ -90,6 +95,17 @@ export function deriveCaseStatus(
         return 'failed';
       }
     }
+  }
+  if (
+    executions.some((execution) =>
+      (execution.tasks ?? []).some(
+        (task) =>
+          task.status === 'suspended' ||
+          task.observationSuspension !== undefined,
+      ),
+    )
+  ) {
+    return 'interrupted';
   }
   return 'passed';
 }

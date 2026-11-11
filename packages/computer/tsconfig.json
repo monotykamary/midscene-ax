@@ -2,7 +2,7 @@
   "extends": "../shared/tsconfig.base.json",
   "compilerOptions": {
     "rootDir": ".",
-    "module": "ES2020",
+    "module": "ESNext",
     "declarationDir": "dist/types",
     "types": ["node"]
   },

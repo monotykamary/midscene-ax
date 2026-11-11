@@ -166,6 +166,80 @@ describe(
       });
     });
 
+    it('preserves action suspension and never dispatches later queued actions', async () => {
+      const suspension = {
+        status: 'suspended' as const,
+        reason: 'native-dialog' as const,
+        continuationId: 'dialog-1',
+        dialogType: 'alert' as const,
+        commandPending: true,
+      };
+      const later = rs.fn();
+      const runner = new TaskRunner('suspended action', fakeUIContextBuilder, {
+        tasks: [
+          {
+            type: 'Action Space',
+            executor: async () => ({
+              output: suspension,
+              suspendPlanning: suspension,
+            }),
+          },
+          { type: 'Action Space', executor: later },
+        ],
+      });
+
+      const result = await runner.flush();
+
+      expect(later).not.toHaveBeenCalled();
+      expect(runner.status).toBe('suspended');
+      expect(runner.tasks.map((task) => task.status)).toEqual([
+        'suspended',
+        'cancelled',
+      ]);
+      expect(result?.suspension).toEqual(suspension);
+      expect(result?.output).toEqual(suspension);
+    });
+
+    it('keeps native-dialog observation interruption distinct from action failure', async () => {
+      const suspension = {
+        status: 'suspended',
+        reason: 'native-dialog',
+        continuationId: 'dialog-observe-1',
+        dialogType: 'confirm',
+        commandPending: false,
+      } as const;
+      let calls = 0;
+      const runner = new TaskRunner(
+        'observation interruption',
+        async () => {
+          calls++;
+          if (calls === 2) {
+            throw Object.assign(new Error('dialog blocks observation'), {
+              code: 'NATIVE_DIALOG_OBSERVATION_INTERRUPTED',
+              suspension,
+            });
+          }
+          return fakeUIContextBuilder();
+        },
+        {
+          tasks: [
+            {
+              type: 'Action Space',
+              executor: async () => ({ output: 'action settled' }),
+            },
+          ],
+        },
+      );
+
+      const result = await runner.flush();
+
+      expect(runner.status).toBe('suspended');
+      expect(runner.tasks[0].status).toBe('finished');
+      expect(runner.tasks[0].error).toBeUndefined();
+      expect(runner.tasks[0].observationSuspension).toEqual(suspension);
+      expect(result?.suspension).toEqual(suspension);
+    });
+
     it('insight - basic run', async () => {
       const insightTask1 = insightFindTask();
       const flushResultData = 'abcdef';

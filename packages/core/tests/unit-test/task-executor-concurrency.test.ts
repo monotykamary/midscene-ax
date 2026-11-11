@@ -1026,7 +1026,7 @@ Stdout:
 
   it('should use the default feedback limit unless a task requests a larger limit', async () => {
     const seenPendingFeedback: string[] = [];
-    const longFeedback = 'x'.repeat(600);
+    const longFeedback = 'x'.repeat(2_600);
     const structuredFeedback = 'y'.repeat(11_000);
     const boundedFeedback = 'z'.repeat(800);
 
@@ -1118,10 +1118,10 @@ Stdout:
       defaultModel(),
     );
 
-    expect(seenPendingFeedback[1]).toContain('x'.repeat(500));
-    expect(seenPendingFeedback[1]).not.toContain('x'.repeat(600));
+    expect(seenPendingFeedback[1]).toContain('x'.repeat(2_000));
+    expect(seenPendingFeedback[1]).not.toContain('x'.repeat(2_600));
     expect(seenPendingFeedback[1]).toContain(
-      '...[truncated, 100 more characters]',
+      '...[truncated, 600 more characters]',
     );
     expect(seenPendingFeedback[1]).toContain(structuredFeedback);
     expect(seenPendingFeedback[1]).toContain('z'.repeat(700));

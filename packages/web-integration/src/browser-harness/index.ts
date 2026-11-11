@@ -11,5 +11,11 @@ export {
   type HarnessLocatorCall,
 } from './receipt';
 export { Browser, Page, Locator } from './vendor/bhjs/browser';
-export { SELECT_ALL_MODIFIER, typeKeys } from './vendor/bhjs/interaction';
+export {
+  InteractionController,
+  SELECT_ALL_MODIFIER,
+  typeKeys,
+  type ScopeBinding,
+} from './vendor/bhjs/interaction';
 export { Session, type ConnectOptions } from './vendor/bhjs/session';
+export { snapshotAncestry } from './vendor/bhjs/snapshot';
