@@ -4,6 +4,7 @@ import { InteractionController, type InteractionAction, type InteractionObservat
 import { renderAX, snapshotDiff, snapshotLimits, nodeIdentity, snapshotAncestry, roleOf, nameOf, SnapshotLimitError, MAX_SNAPSHOT_CHARS, MISSING_SUBTREE,
   type AXNode, type SnapshotOptions, type SnapshotFrame, type SnapshotRef, type PageSnapshot } from './snapshot.js';
 export type { PageSnapshot, SnapshotOptions } from './snapshot.js';
+import { initialNavigation, navigationStep, type NavigationEvent, type NavigationParams, type NavigationState } from './navigation-state.js';
 
 export type PageOptions = {
   sessionId: string; targetId?: string; allowedOrigins: string[]; input?: InteractionInput; timeoutMs?: number; ownsAttachment?: boolean;
@@ -30,7 +31,15 @@ const invalidations = new Set(['Page.frameNavigated', 'Page.navigatedWithinDocum
   'Runtime.executionContextsCleared', 'DOM.documentUpdated', 'Inspector.detached', 'Inspector.targetCrashed']);
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const UNREADABLE_FRAME = /^frame \S+: (?:origin_denied|not committed)$/;
+/** Navigation events held until Page.navigate names the requested document; more fail closed. */
+const MAX_BUFFERED_NAVIGATION_EVENTS = 128;
 const frameKey = (frame: any) => JSON.stringify([frame.id, frame.loaderId, frame.url]);
+/** A binding's authored role and name against the resolved AX node; an unset constraint is not checked. */
+const matchesTarget = (binding: ScopeBinding, ref: Pick<SnapshotRef, 'role' | 'name'>): boolean =>
+  (binding.targetRole === undefined || ref.role === binding.targetRole) &&
+  (binding.targetName === undefined || (binding.targetExact === false
+    ? ref.name.toLowerCase().includes(binding.targetName.toLowerCase())
+    : ref.name === binding.targetName));
 
 /** Scope-bound page. No method reads or changes Session's mutable active-target pointer. */
 export class Page {
@@ -461,6 +470,9 @@ export class Page {
       const ref = await this.resolve(query, signal);
       await this.currentTarget(ref, signal);
       const scopeBinding = options.scopeBinding ?? ref.scopeBinding;
+      // An authored role or name stays the contract after a scoped lookup: the resolved
+      // node's own accessible role and name must still be it, before anything is dispatched.
+      if (scopeBinding && !matchesTarget(scopeBinding, ref)) return { status: 'blocked', reason: 'scope_target_mismatch', verified: null };
       const { frames } = await this.framesInternal(signal);
       if (ref.frame.frameId !== frames[0]!.frameId) return { status: 'blocked', reason: 'frame_actions_unsupported', verified: null };
       const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId, scopeBinding, scopeRootBackendNodeId }, { signal });
@@ -552,6 +564,13 @@ export class Page {
     return this.run(signal => this.guard.waitForChange({ scope: this.scope, revision, timeoutMs: options.waitMs ?? 5000 }, { signal }), options);
   }
 
+  /**
+   * Navigate and settle on the requested document's readiness (DOMContentLoaded of the
+   * committed root document), not its load event: a held image or slow subresource must
+   * not stall a test. Only the commit `Page.navigate` reported may anchor readiness, so an
+   * earlier in-flight document, a child frame, another session or a replaced document can
+   * never stand in for it. `executed` / `document_ready` is a readiness receipt only.
+   */
   async goto(url: string, options: CallOptions = {}): Promise<ActionResult> {
     let dispatched = false;
     return this.run<ActionResult>(async signal => {
@@ -559,27 +578,91 @@ export class Page {
       this.invalidate();
       await this.call('Page.enable', {}, signal);
       await this.call('Page.setLifecycleEventsEnabled', { enabled: true }, signal);
-      const loaded = new Set<string>();
-      let loader: string | undefined, ready!: () => void;
-      const promise = new Promise<void>(resolve => { ready = resolve; });
+      const rootFrame = async () => (await this.call('Page.getFrameTree', {}, signal)).frameTree?.frame;
+      const before = await rootFrame();
+      const params: NavigationParams = { session: this.scope.sessionId, expectedFrame: undefined, expectedLoader: undefined };
+      let accepting = false;
+      const buffered: NavigationEvent[] = [];
+      let state: NavigationState = { ...initialNavigation(), frame: before?.id ?? 0, loader: before?.loaderId ?? 0 };
+      let revision = 0, wake: (() => void) | undefined, failure: Error | undefined;
+      const apply = (event: NavigationEvent) => {
+        if (!accepting) {
+          if (buffered.length < MAX_BUFFERED_NAVIGATION_EVENTS) buffered.push(event);
+          else failure ??= new Error('navigation_event_capacity');
+          return;
+        }
+        state = navigationStep(params, state, event); revision++; wake?.();
+      };
+      const fail = (error: Error) => { failure = error; apply({ session: params.session, kind: 'fail' }); };
       const off = this.session.onEvent((method, p: any, sid) => {
-        if (sid === this.scope.sessionId && method === 'Page.lifecycleEvent' && p.name === 'load') {
-          loaded.add(p.loaderId); if (p.loaderId === loader) ready();
+        if (sid !== params.session) return;
+        if (method === 'Page.frameNavigated' && p.frame && !p.frame.parentId) {
+          if (!this.allowed(p.frame)) { fail(new Error('origin_denied')); return; }
+          if (p.frame.loaderId && p.frame.loaderId !== before?.loaderId) apply({ kind: 'commit', session: sid, frame: p.frame.id, loader: p.frame.loaderId, root: true });
+        } else if (method === 'Page.frameStartedNavigating' || (method === 'Page.frameRequestedNavigation' && p.disposition === 'currentTab')) {
+          if (!['sameDocument', 'historySameDocument'].includes(p.navigationType)) apply({ kind: 'start', session: sid, frame: p.frameId });
+        } else if (method === 'Page.lifecycleEvent' && ['DOMContentLoaded', 'init'].includes(p.name)) {
+          apply({ kind: p.name === 'init' ? 'reset' : 'dcl', session: sid, frame: p.frameId, loader: p.loaderId });
+        } else if (method === 'Inspector.targetCrashed' || (method === 'Page.frameDetached' && p.frameId === state.frame)) {
+          fail(new Error('navigation_target_unavailable'));
         }
       });
-      const abort = () => ready();
+      const abort = () => apply({ kind: 'timeout' });
       signal.addEventListener('abort', abort, { once: true });
+      const changed = (seen: number) => new Promise<void>(resolve => {
+        wake = resolve;
+        if (revision !== seen || signal.aborted) resolve();
+      }).finally(() => { wake = undefined; });
       try {
         dispatched = true;
         const nav = await this.call('Page.navigate', { url }, signal);
         if (nav.errorText) throw new Error(nav.errorText);
-        loader = nav.loaderId;
-        if (loader && !loaded.has(loader)) await promise;
-        this.assertLive(signal);
-        const result: ActionResult = { status: 'executed', reason: 'navigation_observed', verified: null };
-        try { result.snapshot = await this.snapshotInternal({}, signal); }
-        catch (error) { result.verificationError = message(error); }
-        return result;
+        if (nav.isDownload) throw new Error('navigation_download');
+        if (!nav.frameId) throw new Error('navigation_missing_identity');
+        if (failure) throw failure;
+        params.expectedFrame = nav.frameId;
+        params.expectedLoader = nav.loaderId ?? before?.loaderId;
+        accepting = true;
+        // Replay in protocol order: only the requested commit may establish the chain;
+        // a previous in-flight document cannot stand in for this request.
+        for (const event of buffered) apply(event);
+        buffered.length = 0;
+        // Same-document navigation has no loaderId or new DOMContentLoaded. Read the original
+        // document in a frame-specific isolated world, then recheck its identity.
+        if (!nav.loaderId && !state.committed && !state.pending && before?.id === nav.frameId && before.loaderId) {
+          const current = await rootFrame();
+          if (!state.pending && !state.committed && current?.id === before.id && current.loaderId === before.loaderId && this.allowed(current)) {
+            apply({ kind: 'commit', session: params.session, frame: current.id, loader: current.loaderId, root: true });
+            const { executionContextId } = await this.call('Page.createIsolatedWorld', { frameId: current.id, worldName: 'navigation-readiness' }, signal);
+            const sample = await this.call('Runtime.evaluate', { contextId: executionContextId, expression: "document.readyState === 'complete' || performance.getEntriesByType('navigation').some(entry => entry.domContentLoadedEventEnd > 0)", returnByValue: true }, signal);
+            const after = await rootFrame();
+            if (state.committed && !state.pending && state.frame === current.id && state.loader === current.loaderId && after?.id === current.id && after.loaderId === current.loaderId && this.allowed(after) && !sample.exceptionDetails && sample.result?.value === true) {
+              apply({ kind: 'dcl', session: params.session, frame: current.id, loader: current.loaderId });
+            }
+          }
+        }
+        for (;;) {
+          this.assertLive(signal);
+          if (state.terminal) throw failure ?? new Error('navigation_unavailable');
+          const seen = revision;
+          if (state.ready) {
+            const identity = { frame: state.frame, loader: state.loader };
+            const current = await rootFrame();
+            if (!current || !this.allowed(current)) throw new Error('origin_denied');
+            if (current.id === identity.frame && current.loaderId === identity.loader && state.ready && state.frame === identity.frame && state.loader === identity.loader) {
+              const result: ActionResult = { status: 'executed', reason: 'document_ready', verified: null };
+              try { result.snapshot = await this.snapshotInternal({}, signal); }
+              catch (error) { result.verificationError = message(error); }
+              this.assertLive(signal);
+              const after = await rootFrame();
+              if (!after || !this.allowed(after)) throw new Error('origin_denied');
+              if (state.ready && !state.terminal && state.frame === identity.frame && state.loader === identity.loader && after.id === identity.frame && after.loaderId === identity.loader) return result;
+              // A replacement committed during snapshot construction: discard it and wait again.
+              continue;
+            }
+          }
+          await changed(seen);
+        }
       } finally { off(); signal.removeEventListener('abort', abort); }
     }, options).catch(error => ({ status: dispatched ? 'outcome_unknown' : 'blocked', reason: message(error), verified: null }));
   }

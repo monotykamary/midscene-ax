@@ -1,11 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 export type InteractionScope = { sessionId: string };
+/**
+ * The authored target a scoped locator must still be: its accessible role and name, checked
+ * against the resolved node before anything is dispatched. A name is exact (case included)
+ * unless `targetExact` is false, which matches a case-insensitive substring.
+ */
+export type TargetConstraints = { targetRole?: string; targetName?: string; targetExact?: boolean };
 /** A target's required context, fixed when observed and never supplied by act(). */
-export type ScopeBinding =
+export type ScopeBinding = TargetConstraints & (
   | { kind: 'layout'; rootSelector: string; contextText: string }
   | { kind: 'semantic'; rootBackendNodeId: number; role: string; name: string }
-  | { kind: 'identity'; rootBackendNodeId: number };
+  | { kind: 'identity'; rootBackendNodeId: number });
 export type InteractionSession = {
   _call(method: string, params: unknown, opts: { sessionId: string; expectedGeneration?: number }): Promise<unknown>;
   onEvent?(fn: (method: string, params: any, sessionId?: string) => void): () => void;
@@ -1271,7 +1277,9 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   const truncation = { elements: elementsTruncated, scan: scanned === LIMITS.scan, text: textTruncated };
   const describe = node => {
     const id = node.getAttribute && node.getAttribute('id');
-    const text = privateMarked(node) ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    // A sensitive or masked node's text is withheld even under the host's grant.
+    const withheld = typeof node.hasAttribute !== 'function' || privateMarked(node) || masked(node) || sensitiveField(node);
+    const text = withheld ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
     return String(node.tagName || 'node').toLowerCase() + (id ? '#' + id.slice(0, 64) : '') + (text ? ' ' + JSON.stringify(text) : '');
   };
   const explain = el => {
@@ -1290,7 +1298,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     for (let node = el; node; node = composedParent(node)) {
       const style = getComputedStyle(node);
       const hidden = style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0 || node.hidden || node.inert;
-      if (hidden && !(node === el && transparentNative(el))) {
+      if (hidden && !(node === el && transparentProxy(el))) {
         return 'hidden (' + (node === el ? 'itself' : 'by ancestor ' + describe(node)) + '); open or reveal what contains it first';
       }
       if (!ariaHidden && node.getAttribute('aria-hidden') === 'true') ariaHidden = node;
