@@ -15,7 +15,8 @@ export {
   InteractionController,
   SELECT_ALL_MODIFIER,
   typeKeys,
+  type InteractionCommit,
   type ScopeBinding,
 } from './vendor/bhjs/interaction';
 export { Session, type ConnectOptions } from './vendor/bhjs/session';
-export { snapshotAncestry } from './vendor/bhjs/snapshot';
+export { snapshotAncestry, type AXNode } from './vendor/bhjs/snapshot';

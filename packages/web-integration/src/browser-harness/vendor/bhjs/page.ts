@@ -31,6 +31,12 @@ const invalidations = new Set(['Page.frameNavigated', 'Page.navigatedWithinDocum
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 const UNREADABLE_FRAME = /^frame \S+: (?:origin_denied|not committed)$/;
 const frameKey = (frame: any) => JSON.stringify([frame.id, frame.loaderId, frame.url]);
+/** A binding's authored role and name against the resolved AX node; an unset constraint is not checked. */
+const matchesTarget = (binding: ScopeBinding, ref: Pick<SnapshotRef, 'role' | 'name'>): boolean =>
+  (binding.targetRole === undefined || ref.role === binding.targetRole) &&
+  (binding.targetName === undefined || (binding.targetExact === false
+    ? ref.name.toLowerCase().includes(binding.targetName.toLowerCase())
+    : ref.name === binding.targetName));
 
 /** Scope-bound page. No method reads or changes Session's mutable active-target pointer. */
 export class Page {
@@ -461,6 +467,9 @@ export class Page {
       const ref = await this.resolve(query, signal);
       await this.currentTarget(ref, signal);
       const scopeBinding = options.scopeBinding ?? ref.scopeBinding;
+      // An authored role or name stays the contract after a scoped lookup: the resolved
+      // node's own accessible role and name must still be it, before anything is dispatched.
+      if (scopeBinding && !matchesTarget(scopeBinding, ref)) return { status: 'blocked', reason: 'scope_target_mismatch', verified: null };
       const { frames } = await this.framesInternal(signal);
       if (ref.frame.frameId !== frames[0]!.frameId) return { status: 'blocked', reason: 'frame_actions_unsupported', verified: null };
       const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId, scopeBinding, scopeRootBackendNodeId }, { signal });

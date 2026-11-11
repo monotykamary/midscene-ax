@@ -389,6 +389,111 @@ describe('BrowserHarnessPage against a real browser', () => {
     }
   });
 
+  it('refuses a scoped target whose authored role or name is not the resolved node, before dispatch', async () => {
+    await observer.evaluate(() => {
+      const root = document.createElement('section');
+      root.id = 'target-fixture';
+      // Inside the viewport and clear of the fixture's overlay (top 190-260px).
+      root.style.cssText = 'position:fixed;left:20px;top:120px;z-index:1000';
+      root.innerHTML =
+        '<div id="target-owned" style="display:flex;gap:8px">Target group<button id="target-button">Proceed</button><span id="target-label">Different action</span><input id="target-field" aria-label="Quantity" value="seed" /></div>';
+      (window as any).targetClicks = 0;
+      root.querySelector('button')!.addEventListener('click', () => {
+        (window as any).targetClicks++;
+      });
+      document.body.appendChild(root);
+    });
+    const binding = {
+      kind: 'layout' as const,
+      rootSelector: '#target-owned',
+      contextText: 'Target group',
+    };
+    type Constraints = {
+      targetRole?: string;
+      targetName?: string;
+      targetExact?: boolean;
+    };
+    const click = (constraints: Constraints) =>
+      device.page
+        .locator('#target-button')
+        .withScopeBinding({ ...binding, ...constraints })
+        .click();
+    const fill = (constraints: Constraints) =>
+      device.page
+        .locator('#target-field')
+        .withScopeBinding({ ...binding, ...constraints })
+        .fill('replacement');
+    const targetClicks = () =>
+      observer.evaluate(() => (window as any).targetClicks);
+    const fieldValue = () =>
+      observer.evaluate(
+        () =>
+          (document.querySelector('#target-field') as HTMLInputElement).value,
+      );
+    const refused = { status: 'blocked', reason: 'scope_target_mismatch' };
+    try {
+      const executed = { status: 'executed' };
+      expect(
+        await click({ targetRole: 'button', targetName: 'Proceed' }),
+      ).toMatchObject(executed);
+      // targetExact: false is a case-insensitive substring; the default is exact.
+      expect(
+        await click({
+          targetRole: 'button',
+          targetName: 'pROC',
+          targetExact: false,
+        }),
+      ).toMatchObject(executed);
+      expect(await targetClicks()).toBe(2);
+      for (const constraints of [
+        { targetRole: 'link', targetName: 'Proceed' },
+        { targetRole: 'button', targetName: 'proceed' },
+        { targetRole: 'button', targetName: 'Proc' },
+        { targetRole: 'button', targetName: 'proceed', targetExact: true },
+      ]) {
+        expect(await click(constraints)).toMatchObject(refused);
+      }
+      // An explicit role is the node's role, whatever its tag.
+      await observer.evaluate(() =>
+        document.querySelector('#target-button')!.setAttribute('role', 'link'),
+      );
+      expect(
+        await click({ targetRole: 'button', targetName: 'Proceed' }),
+      ).toMatchObject(refused);
+      // The accessible name wins over the element's own text.
+      await observer.evaluate(() => {
+        const button = document.querySelector('#target-button')!;
+        button.removeAttribute('role');
+        button.setAttribute('aria-labelledby', 'target-label');
+      });
+      expect(
+        await click({ targetRole: 'button', targetName: 'Proceed' }),
+      ).toMatchObject(refused);
+      expect(await targetClicks()).toBe(2);
+      // A scoped fill keeps the authored role too: no character is typed.
+      await observer.evaluate(() =>
+        document
+          .querySelector('#target-field')!
+          .setAttribute('role', 'combobox'),
+      );
+      expect(
+        await fill({ targetRole: 'textbox', targetName: 'Quantity' }),
+      ).toMatchObject(refused);
+      expect(await fieldValue()).toBe('seed');
+      await observer.evaluate(() =>
+        document.querySelector('#target-field')!.removeAttribute('role'),
+      );
+      expect(
+        await fill({ targetRole: 'textbox', targetName: 'Quantity' }),
+      ).toMatchObject(executed);
+      expect(await fieldValue()).toBe('replacement');
+    } finally {
+      await observer.evaluate(() =>
+        document.querySelector('#target-fixture')?.remove(),
+      );
+    }
+  });
+
   it('refuses a retained ref after its unchanged target moves to another owner', async () => {
     await observer.evaluate(() => {
       const root = document.createElement('section');

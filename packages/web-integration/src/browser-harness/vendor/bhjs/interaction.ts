@@ -1,11 +1,17 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 export type InteractionScope = { sessionId: string };
+/**
+ * The authored target a scoped locator must still be: its accessible role and name, checked
+ * against the resolved node before anything is dispatched. A name is exact (case included)
+ * unless `targetExact` is false, which matches a case-insensitive substring.
+ */
+export type TargetConstraints = { targetRole?: string; targetName?: string; targetExact?: boolean };
 /** A target's required context, fixed when observed and never supplied by act(). */
-export type ScopeBinding =
+export type ScopeBinding = TargetConstraints & (
   | { kind: 'layout'; rootSelector: string; contextText: string }
   | { kind: 'semantic'; rootBackendNodeId: number; role: string; name: string }
-  | { kind: 'identity'; rootBackendNodeId: number };
+  | { kind: 'identity'; rootBackendNodeId: number });
 export type InteractionSession = {
   _call(method: string, params: unknown, opts: { sessionId: string; expectedGeneration?: number }): Promise<unknown>;
   onEvent?(fn: (method: string, params: any, sessionId?: string) => void): () => void;
