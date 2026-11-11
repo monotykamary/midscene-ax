@@ -2,6 +2,8 @@
 
 Report e2e tests exercise core user workflows against generated reports with real Agent recordings. Run `pnpm --filter @midscene/report e2e` with model credentials configured. The command builds the report and CLI, generates fixtures, and runs all YAML suites through Midscene Test before summarizing failures. The project sets `test.bail: 0` so a failed Case does not prevent later files from running. Any failed suite still makes the command fail.
 
+The config is `apps/report/midscene.config.ts`. Its directory is the test root, so `e2e/*.yaml` selects the suites and default artifacts stay under `apps/report/midscene_run/`.
+
 ## Development principle
 
 Report development, review and testing prioritize core workflows and data correctness. Keep routine iterations focused on whether users can read results, navigate Cases and inspect failures and evidence. Spacing, colors, borders, shadows, corner radii, icon appearance and exact dimensions should not become default acceptance criteria or trigger repeated validation unless an explicit design requirement calls for them.
@@ -34,3 +36,15 @@ Retain `aiAssert`, `aiTap`, `aiHover` and related AI coverage. Reserve JavaScrip
 Put aggregation rules, serialization limits, state transitions and functional calculations in the nearest unit tests. Add e2e coverage when browser integration or a user workflow is necessary. Each scenario should cover one workflow; avoid repeating the same navigation and visual checks across suites.
 
 Generated fixtures belong in ignored `dist/`. Keep the static pages unchanged during a run; concurrent builds clean that directory. When another build must run concurrently, copy the generated static pages to a temporary directory and adjust the static server's path in `midscene.config.ts` to serve that snapshot.
+
+### Concurrent CI execution
+
+CI runs the complete YAML suite on one machine, with at most three files active.
+Each file has its own context, Page and Agent; only the browser and static server
+are shared. Steps inside a file remain sequential. New YAML files are discovered
+automatically, and all results appear in one native report. AI assertions and
+retry settings are unchanged. Local runs use the same concurrency limit.
+
+Builds, fixtures and tests use one checkout. Ordinary events check out the event
+SHA; manual runs resolve the selected branch once. A failed-job rerun rebuilds
+its fixtures and runtime, so it does not depend on an expiring shared artifact.
