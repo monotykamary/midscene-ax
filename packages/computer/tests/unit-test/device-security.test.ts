@@ -169,6 +169,10 @@ rs.mock('screenshot-desktop', () => ({
   default: mockState.screenshot,
 }));
 
+rs.mock('@computer-use/libnut/dist/import_libnut.js', () => ({
+  libnut: mockState.libnut,
+}));
+
 rs.mock('node:module', () => ({
   createRequire: mockState.createRequire,
 }));

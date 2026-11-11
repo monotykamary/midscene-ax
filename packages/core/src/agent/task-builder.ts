@@ -12,6 +12,7 @@ import type Service from '@/service';
 import { setTimingFieldOnce } from '@/task-timing';
 import type {
   AIUsageInfo,
+  ActionExecutionSuspension,
   DetailedLocateParam,
   DeviceAction,
   ElementCacheFeature,
@@ -54,6 +55,39 @@ import {
 } from './utils';
 
 const debug = getDebug('agent:task-builder');
+
+function nativeDialogActionSuspension(
+  error: unknown,
+): ActionExecutionSuspension | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const value = error as {
+    code?: unknown;
+    suspension?: Partial<ActionExecutionSuspension>;
+  };
+  const suspension = value.suspension;
+  if (
+    value.code !== 'ACTION_EXECUTION_SUSPENDED' ||
+    !suspension ||
+    suspension.status !== 'suspended' ||
+    suspension.reason !== 'native-dialog' ||
+    suspension.commandPending === false ||
+    typeof suspension.continuationId !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(suspension.continuationId) ||
+    !['alert', 'confirm', 'prompt', 'beforeunload'].includes(
+      suspension.dialogType as string,
+    )
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    status: 'suspended',
+    reason: 'native-dialog',
+    continuationId: suspension.continuationId,
+    dialogType:
+      suspension.dialogType as ActionExecutionSuspension['dialogType'],
+    commandPending: true,
+  });
+}
 
 /**
  * Check if a cache object is non-empty
@@ -285,7 +319,8 @@ export class TaskBuilder {
     const task: ExecutionTaskApply<
       'Action Space',
       any,
-      { success: boolean; action: string; param: any },
+      | { success: boolean; action: string; param: any }
+      | ActionExecutionSuspension,
       void
     > = {
       type: 'Action Space',
@@ -378,16 +413,24 @@ export class TaskBuilder {
           );
         const refAction = this.refActionFor(action.name, parsedParam);
         let actionResult: Awaited<ReturnType<typeof callByCoordinates>>;
-        if (refAction) {
-          actionResult = await this.callByRef(
-            action.name,
-            refAction,
-            taskContext.task,
-            callByCoordinates,
-            abortSignal,
-          );
-        } else {
-          actionResult = await callByCoordinates();
+        try {
+          if (refAction) {
+            actionResult = await this.callByRef(
+              action.name,
+              refAction,
+              taskContext.task,
+              callByCoordinates,
+              abortSignal,
+            );
+          } else {
+            actionResult = await callByCoordinates();
+          }
+        } catch (error) {
+          const suspension = nativeDialogActionSuspension(error);
+          if (!suspension) throw error;
+          // The device command remains externally owned. Do not run readiness or
+          // post-action hooks, which could observe or replay the pending command.
+          return { output: suspension, suspendPlanning: suspension };
         }
         setTimingFieldOnce(timing, 'callActionEnd');
         debug('called action', action.name, 'result:', actionResult);

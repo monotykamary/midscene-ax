@@ -1,7 +1,11 @@
 import { once } from 'node:events';
 import { type Server, createServer } from 'node:http';
 import type { AddressInfo } from 'node:net';
-import { BrowserHarnessAgent, BrowserHarnessPage } from '@/browser-harness';
+import {
+  BrowserHarnessAgent,
+  BrowserHarnessPage,
+  InteractionController,
+} from '@/browser-harness';
 import type { TreeMatch } from '@midscene/core';
 import {
   MIDSCENE_MODEL_API_KEY,
@@ -343,6 +347,137 @@ describe('BrowserHarnessPage against a real browser', () => {
       attrs: { name: 'Log in' },
       bounds: { left: 20, top: 20, width: 120, height: 32 },
     });
+  });
+
+  it('enforces an explicit layout scope before dispatching a native click', async () => {
+    await observer.evaluate(() => {
+      const root = document.createElement('section');
+      root.id = 'scope-fixture';
+      root.style.cssText = 'position:fixed;left:700px;top:20px;z-index:1000';
+      root.innerHTML =
+        '<div id="scope-owned">Origin group<button id="scope-button">Bound click</button></div><div id="scope-wrong">Other group</div>';
+      root.querySelector('button')!.addEventListener('click', () => {
+        (window as any).scopeClicks = ((window as any).scopeClicks ?? 0) + 1;
+      });
+      (window as any).scopeClicks = 0;
+      document.body.appendChild(root);
+    });
+    try {
+      const bound = device.page.locator('#scope-button').withScopeBinding({
+        kind: 'layout',
+        rootSelector: '#scope-owned',
+        contextText: 'Origin group',
+      });
+      expect((await bound.click()).status).toBe('executed');
+      expect(await observer.evaluate(() => (window as any).scopeClicks)).toBe(
+        1,
+      );
+      await observer.evaluate(() => {
+        document
+          .querySelector('#scope-wrong')!
+          .appendChild(document.querySelector('#scope-button')!);
+      });
+      const refused = await bound.click();
+      expect(refused.status).not.toBe('executed');
+      expect(await observer.evaluate(() => (window as any).scopeClicks)).toBe(
+        1,
+      );
+    } finally {
+      await observer.evaluate(() =>
+        document.querySelector('#scope-fixture')?.remove(),
+      );
+    }
+  });
+
+  it('refuses a retained ref after its unchanged target moves to another owner', async () => {
+    await observer.evaluate(() => {
+      const root = document.createElement('section');
+      root.id = 'ancestry-fixture';
+      root.style.cssText = 'position:fixed;left:700px;top:70px;z-index:1000';
+      root.innerHTML =
+        '<div role="group" aria-label="First owner"><button id="ancestry-button">Ancestry click</button></div><div id="ancestry-other" role="group" aria-label="Second owner"></div>';
+      (window as any).ancestryClicks = 0;
+      root.querySelector('button')!.addEventListener('click', () => {
+        (window as any).ancestryClicks++;
+      });
+      document.body.appendChild(root);
+    });
+    try {
+      const original = await only('Ancestry click');
+      await observer.evaluate(() =>
+        document
+          .querySelector('#ancestry-other')!
+          .appendChild(document.querySelector('#ancestry-button')!),
+      );
+      const refused = await device.page.locator(original.ref).click();
+      expect(refused.status).not.toBe('executed');
+      expect(
+        await observer.evaluate(() => (window as any).ancestryClicks),
+      ).toBe(0);
+    } finally {
+      await observer.evaluate(() =>
+        document.querySelector('#ancestry-fixture')?.remove(),
+      );
+    }
+  });
+
+  it('keeps masked native values out of both observations and commit delivery', async () => {
+    const before = 'fixture-private-before';
+    const after = 'fixture-private-after';
+    await observer.evaluate((value) => {
+      const input = document.createElement('input');
+      input.id = 'masked-commit-fixture';
+      input.type = 'password';
+      input.style.cssText =
+        'position:fixed;left:600px;top:140px;width:120px;height:30px;z-index:1000';
+      input.value = value;
+      document.body.appendChild(input);
+    }, before);
+    const guard = new InteractionController(device.session, {
+      allowedOrigins: [baseUrl],
+      input: 'trusted',
+      allowSensitive: true,
+      maskSensitive: true,
+    });
+    try {
+      const document = await device.page.cdp('DOM.getDocument', {});
+      const selected = await device.page.cdp('DOM.querySelector', {
+        nodeId: document.root.nodeId,
+        selector: '#masked-commit-fixture',
+      });
+      const described = await device.page.cdp('DOM.describeNode', {
+        nodeId: selected.nodeId,
+      });
+      const observed = await guard.observe({
+        scope: device.page.scope,
+        backendNodeId: described.node.backendNodeId,
+      });
+      expect(observed.candidates).toHaveLength(1);
+      expect(observed.candidates[0].value).toBe('[masked]');
+      const targetId = observed.candidates[0].id;
+      const acted = await guard.act({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        action: { targetId, operation: 'type', text: after },
+      });
+      expect(acted.status).toBe('executed');
+      expect(acted.verified).toBeNull();
+      const committed = await guard.commitTypedValue({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        targetId,
+      });
+      expect(committed.masked).toBe(true);
+      expect(committed.verified).toBeNull();
+      const delivery = JSON.stringify({ observed, acted, committed });
+      expect(delivery).not.toContain(before);
+      expect(delivery).not.toContain(after);
+    } finally {
+      guard.close();
+      await observer.evaluate(() =>
+        document.querySelector('#masked-commit-fixture')?.remove(),
+      );
+    }
   });
 
   it('takes a screenshot the size of the viewport', async () => {

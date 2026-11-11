@@ -19,14 +19,17 @@ export default defineConfig({
         distPath: { root: 'dist/es' },
         // Keep as external so it's loaded at runtime
         // This allows try-catch to properly handle missing optional dependency
-        externals: ['node-mac-permissions'],
+        externals: ['node-mac-permissions', /^\.\.\/\.\.\/bin\/darwin\//],
       },
+      source: { entry: { index: './src/index-esm.ts' } },
       dts: {
         bundle: true,
         distPath: 'dist/types',
       },
       format: 'esm',
-      syntax: 'es2020',
+      // The ESM entry initializes optional native assets before exporting the
+      // synchronous permission API. CJS keeps its existing lazy loader.
+      syntax: 'es2022',
     },
   ],
   source: {

@@ -39,6 +39,7 @@ const PACKAGES = [
   ['core', 'midscene-core'],
   ['playground', 'midscene-playground'],
   ['web-integration', 'midscene-web'],
+  ['computer', 'midscene-computer'],
 ];
 const root = path.resolve(import.meta.dirname, '..');
 const out = path.resolve(root, values.out);
@@ -95,7 +96,12 @@ for (const [dir] of PACKAGES) {
   // Left out of the published manifest (JSON.stringify drops undefined keys).
   published.private = undefined;
   published.devDependencies = undefined;
-  published.scripts = undefined;
+  // Native RDP helpers on other platforms can be built explicitly after install.
+  // Never carry publish/install lifecycle hooks into the renamed package.
+  published.scripts =
+    dir === 'computer'
+      ? { 'build:native': manifest.scripts['build:native'] }
+      : undefined;
   writeFileSync(
     path.join(stage, 'package.json'),
     `${JSON.stringify(published, null, 2)}\n`,

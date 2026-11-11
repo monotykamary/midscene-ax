@@ -36,6 +36,10 @@ import {
   US_SHIFTED_CHARACTER_KEYS,
   resolveShiftedKey,
 } from './keyboard-layout';
+import {
+  computerNativeRuntime,
+  createEmbeddedHelperExtractor,
+} from './native-runtime';
 import { clampPointerPointToSize } from './pointer';
 import {
   type WindowsDisplayGeometry,
@@ -230,8 +234,9 @@ async function getLibnut(): Promise<LibNut> {
   if (libnutLoadError) throw libnutLoadError;
 
   try {
-    const require = createRequire(import.meta.url);
-    const libnutModule = require('@computer-use/libnut/dist/import_libnut');
+    const libnutModule = await import(
+      '@computer-use/libnut/dist/import_libnut.js'
+    );
     libnut = libnutModule.libnut as LibNut;
     if (!libnut) {
       throw new Error('libnut module loaded but libnut object is undefined');
@@ -250,6 +255,11 @@ const warnDevice = getDebug('computer:device', { console: true });
 const debugComputerInput = getDebug('computer:input', { console: true });
 const WINDOWS_UIPI_DOC_URL =
   'https://midscenejs.com/computer-getting-started#windows-clicks-have-no-effect-on-some-apps';
+
+const extractEmbeddedHelper = createEmbeddedHelperExtractor(
+  () => computerNativeRuntime()?.helpers ?? {},
+  (message, error) => debugDevice(message, error),
+);
 
 function resolvePackageRoot(helperName: string): string | null {
   const require = createRequire(import.meta.url);
@@ -297,6 +307,11 @@ export function getPhasedScrollBinary(): string | null {
     return null;
   }
 
+  const embedded = extractEmbeddedHelper('phased-scroll');
+  if (embedded) {
+    phasedScrollBinaryPath = embedded;
+    return embedded;
+  }
   const pkgRoot = resolvePackageRoot('phased-scroll');
   if (!pkgRoot) {
     phasedScrollBinaryPath = null;
@@ -334,6 +349,11 @@ export function getDisplayInfoBinary(): string | null {
     return null;
   }
 
+  const embedded = extractEmbeddedHelper('display-info');
+  if (embedded) {
+    displayInfoBinaryPath = embedded;
+    return embedded;
+  }
   const pkgRoot = resolvePackageRoot('display-info');
   if (!pkgRoot) {
     displayInfoBinaryPath = null;
@@ -345,6 +365,11 @@ export function getDisplayInfoBinary(): string | null {
     debugDevice('display-info binary not found at', binPath);
     displayInfoBinaryPath = null;
     return null;
+  }
+  try {
+    if ((statSync(binPath).mode & 0o111) === 0) chmodSync(binPath, 0o755);
+  } catch (error) {
+    debugDevice('display-info: chmod self-heal failed', error);
   }
   displayInfoBinaryPath = binPath;
   return binPath;
