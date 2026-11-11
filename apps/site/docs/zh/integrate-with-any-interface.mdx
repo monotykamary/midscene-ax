@@ -319,6 +319,42 @@ abstract class AbstractInterface {
 - `beforeInvokeAction?(actionName: string, param: any): Promise<void>`：在动作空间中调用动作之前的钩子函数
 - `afterInvokeAction?(actionName: string, param: any): Promise<void>`：在调用动作之后的钩子函数
 
+#### 无障碍树契约（可选）
+
+如果你的界面能读取无障碍树（DOM 无障碍信息、Android UI 层级、iOS WDA source、macOS AX、Windows UIA），可以实现下面三个方法。Midscene 会先通过无障碍树定位和操作元素，只有在无障碍树无法确定目标时才调用模型。无障碍树是动作的寻址空间，视觉定位（AI locate）作为兜底。
+
+```ts
+import type {
+  ActReceipt,
+  Perceivability,
+  RefOperation,
+  TreeMatch,
+  TreeQuery,
+} from '@midscene/core';
+
+class MyInterface extends AbstractInterface {
+  // 返回所有匹配的元素，由 Midscene 决定如何处理
+  async locateInTree(query: TreeQuery, signal?: AbortSignal): Promise<TreeMatch[]> { /* ... */ }
+  // 对 ref 指向的元素执行一次操作，并返回执行结果
+  async actOnRef(match: TreeMatch, operation: RefOperation, payload?: string, signal?: AbortSignal): Promise<ActReceipt> { /* ... */ }
+  // 用户是否能看到该元素；如果匹配结果已带 `perceivable`，可以不实现
+  async perceivable(match: TreeMatch, signal?: AbortSignal): Promise<Perceivability> { /* ... */ }
+}
+```
+
+- `TreeQuery` 可以是 `{ ref }`（来自快照或之前匹配结果的不透明句柄），也可以是 `{ role?, name, exact?, context? }`。`TreeMatch.rect` 使用与 `size()` 相同的逻辑坐标。
+- **定位。** Midscene 依次尝试：规划器返回的坐标、`xpath`、**无障碍树**、定位缓存、AI locate。无障碍树查询来自 locate 选项 `tree`（例如 `agent.aiTap('Log in', { tree: { role: 'button', name: 'Log in' } })`）。未提供时，纯字符串 prompt 会在规范化空白后作为精确的无障碍名称查询。Midscene 不会从一句描述中推导更宽松的查询。
+- **只接受唯一结果，否则放弃。** 只有当 `locateInTree` 恰好返回一个匹配，且该匹配没有被标记为不可见（通过 `match.perceivable` 或 `perceivable()`）时，才采用无障碍树的结果。没有匹配、多个匹配、匹配不可见或调用出错时，都会继续交给缓存和 AI locate。放弃的原因记录在 `task.treeLocate` 中，命中时报告显示 `hitBy.from: 'Accessibility tree'`。无障碍树命中不会写入定位缓存。
+- **操作。** 当元素来自无障碍树时，`Tap`、`DoubleClick`、`RightClick`、`Hover`、`ClearInput`、带目标的 `KeyboardPress`，以及 `replace` 或 `clear` 模式的 `Input` 会调用 `actOnRef`，而不是按坐标操作。其他动作和选项仍按坐标执行。执行结果保存在 `task.receipt`：
+  - `executed`：已完成，`verified` 保持接口返回的值。
+  - `stale`：ref 已失效，Midscene 按坐标执行一次该动作，并记录 `refAct.fallback: 'coordinates'`。
+  - `blocked`：Midscene 抛出带有 `reason` 的错误，不会改用坐标重试。
+  - `outcome_unknown`：记录结果，`verified` 不会为 `true`，并提示下一轮规划先检查屏幕。
+- **拒绝某个操作。** 如果 `actOnRef` 只能执行部分操作（例如 harness 没有受保护的悬停或双击），还需实现 `supportsRefOperation(match, operation, payload?, signal?): Promise<boolean>`。返回 `false` 时，Midscene 不调用 `actOnRef`，而是按定位到的坐标操作，并记录 `refAct.declined: true`。由元素状态导致的拒绝（禁用、被遮挡）不应通过这里拒绝：应返回 `blocked` 回执，让原因传到该步骤。
+- **重新绑定失效的 ref。** 在返回 `stale` 之前，界面可以在新的无障碍树中对身份相同的唯一元素执行操作，并通过 `receipt.rebound: { from, to }` 报告。实现了这一点的 Web 界面见 [browser-harness-js](./integrate-with-browser-harness)。
+
+未实现这些方法的界面，行为与之前完全一致。
+
 ### 动作空间（Action Space）
 
 动作空间是界面上可执行动作的集合。AI 模型将使用这些动作来执行操作。所有动作的描述和参数模式都会提供给 AI 模型。
