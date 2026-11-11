@@ -494,6 +494,54 @@ describe('BrowserHarnessPage against a real browser', () => {
     }
   });
 
+  it('explains a hidden target without its sensitive text, even under the grant', async () => {
+    const secret = 'fixture-sensitive-text';
+    await observer.evaluate((text) => {
+      const root = document.createElement('section');
+      root.id = 'refusal-fixture';
+      root.innerHTML = `<button id="refusal-self" style="display:none">Hidden itself</button><div id="refusal-owner" data-sensitive style="display:none">${text}<button id="refusal-child">Inside</button></div>`;
+      document.body.appendChild(root);
+    }, secret);
+    const guard = new InteractionController(device.session, {
+      allowedOrigins: [baseUrl],
+      input: 'trusted',
+      allowSensitive: true,
+      maskSensitive: true,
+    });
+    const backendNodeId = async (selector: string) => {
+      const document = await device.page.cdp('DOM.getDocument', {});
+      const selected = await device.page.cdp('DOM.querySelector', {
+        nodeId: document.root.nodeId,
+        selector,
+      });
+      return (
+        await device.page.cdp('DOM.describeNode', { nodeId: selected.nodeId })
+      ).node.backendNodeId as number;
+    };
+    try {
+      const self = await guard.observe({
+        scope: device.page.scope,
+        backendNodeId: await backendNodeId('#refusal-self'),
+      });
+      expect(self.candidates).toHaveLength(0);
+      expect(self.refusal).toMatch(/^hidden \(itself\)/);
+      const child = await guard.observe({
+        scope: device.page.scope,
+        backendNodeId: await backendNodeId('#refusal-child'),
+      });
+      expect(child.candidates).toHaveLength(0);
+      expect(child.refusal).toMatch(
+        /^hidden \(by ancestor div#refusal-owner\)/,
+      );
+      expect(JSON.stringify(child)).not.toContain(secret);
+    } finally {
+      guard.close();
+      await observer.evaluate(() =>
+        document.querySelector('#refusal-fixture')?.remove(),
+      );
+    }
+  });
+
   it('refuses a retained ref after its unchanged target moves to another owner', async () => {
     await observer.evaluate(() => {
       const root = document.createElement('section');

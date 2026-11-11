@@ -1277,7 +1277,9 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
   const truncation = { elements: elementsTruncated, scan: scanned === LIMITS.scan, text: textTruncated };
   const describe = node => {
     const id = node.getAttribute && node.getAttribute('id');
-    const text = privateMarked(node) ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
+    // A sensitive or masked node's text is withheld even under the host's grant.
+    const withheld = typeof node.hasAttribute !== 'function' || privateMarked(node) || masked(node) || sensitiveField(node);
+    const text = withheld ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
     return String(node.tagName || 'node').toLowerCase() + (id ? '#' + id.slice(0, 64) : '') + (text ? ' ' + JSON.stringify(text) : '');
   };
   const explain = el => {
@@ -1296,7 +1298,7 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     for (let node = el; node; node = composedParent(node)) {
       const style = getComputedStyle(node);
       const hidden = style.display === 'none' || style.visibility !== 'visible' || Number(style.opacity) === 0 || node.hidden || node.inert;
-      if (hidden && !(node === el && transparentNative(el))) {
+      if (hidden && !(node === el && transparentProxy(el))) {
         return 'hidden (' + (node === el ? 'itself' : 'by ancestor ' + describe(node)) + '); open or reveal what contains it first';
       }
       if (!ariaHidden && node.getAttribute('aria-hidden') === 'true') ariaHidden = node;
