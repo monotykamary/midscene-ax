@@ -17,7 +17,7 @@ import SetupEnv from './common/setup-env.mdx';
 
 - **控件被禁用**：操作为 `blocked`，该步骤失败并给出 harness 的原因（例如 `disabled. Verify that with a check, or do what enables it first`）。Midscene 不会改用坐标点击。
 - **定位与操作之间页面重新渲染了该元素**：device 会在新的快照中重新绑定到角色、名称和所在容器都相同的唯一元素（`receipt.rebound`）。若不唯一，回执为 `stale`，Midscene 按定位到的坐标操作一次。
-- **harness 没有受保护形式的操作**（悬停、双击、右键，以及除 `Enter`、`Escape` 等单键外的组合键），以及其 guard 不操作的元素（日期选择器、滑块）：元素仍从无障碍树定位，操作按其坐标执行。
+- **harness 没有受保护形式的操作**（悬停、双击、右键，以及除 `Enter`、`Escape` 等单键外的组合键），以及其 guard 不操作的元素（滑块、自定义选择器组件；原生日期和时间输入框由 guard 直接输入）：元素仍从无障碍树定位，操作按其坐标执行。
 - **iframe 中的元素**会计入匹配数量，但不会从无障碍树绑定：harness 只在顶层文档中操作，因此这些元素交给视觉定位。
 
 无障碍树按页面状态读取一次：在页面导航、执行操作或文档发生变更之前，快照会被复用。

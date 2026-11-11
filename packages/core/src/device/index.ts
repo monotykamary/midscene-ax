@@ -105,6 +105,7 @@ export interface PointerInputPrimitives {
   tap(p: PointerPoint, opts?: { duration?: number }): Promise<void>;
   doubleClick?(p: PointerPoint): Promise<void>;
   rightClick?(p: PointerPoint): Promise<void>;
+  middleClick?(p: PointerPoint): Promise<void>;
   hover?(p: PointerPoint): Promise<void>;
   longPress?(p: PointerPoint, opts?: { duration?: number }): Promise<void>;
   dragAndDrop?(from: PointerPoint, to: PointerPoint): Promise<void>;
@@ -538,6 +539,37 @@ export const defineActionRightClick = (
   });
 };
 
+// MiddleClick
+export const actionMiddleClickParamSchema = z.object({
+  locate: getMidsceneLocationSchema().describe(
+    'The element to be middle clicked',
+  ),
+});
+export type ActionMiddleClickParam = {
+  locate: LocateResultElement;
+};
+
+export const defineActionMiddleClick = (
+  middleClick: NonNullable<PointerInputPrimitives['middleClick']>,
+): DeviceAction<ActionMiddleClickParam> => {
+  return defineLocatedPointAction<
+    typeof actionMiddleClickParamSchema,
+    ActionMiddleClickParam
+  >({
+    name: 'MiddleClick',
+    description: 'Middle click the element',
+    interfaceAlias: 'aiMiddleClick',
+    paramSchema: actionMiddleClickParamSchema,
+    sample: {
+      locate: { prompt: 'the link to open in a new tab' },
+    },
+    missingLocateMessage: 'Element not found, cannot middle click',
+    call: async (point) => {
+      await middleClick(point);
+    },
+  });
+};
+
 // DoubleClick
 export const actionDoubleClickParamSchema = z.object({
   locate: getMidsceneLocationSchema().describe(
@@ -757,7 +789,7 @@ export const actionScrollParamSchema = z.object({
     .enum(['down', 'up', 'right', 'left'])
     .default('down')
     .describe(
-      'The direction toward the off-screen content to reveal. "down" reveals content below the current viewport, "up" reveals content above, "right" reveals content to the right, and "left" reveals content to the left. This does not describe the movement direction of the content currently visible on the screen. Only effective when scrollType is "singleAction".',
+      'The direction toward the off-screen content to reveal. Quick mapping: want to see content below the current viewport -> "down"; above -> "up"; to the left -> "left"; to the right -> "right". This does not describe the movement direction of the content currently visible on the screen. Only effective when scrollType is "singleAction".',
     ),
   distance: z
     .number()
@@ -887,7 +919,7 @@ function createActionSwipeParamSchema(inputMode: SwipeInputMode) {
       .enum(['up', 'down', 'left', 'right'])
       .optional()
       .describe(
-        `${movementSource === 'finger' ? 'Finger' : 'Pointer'} movement direction. Required together with a positive distance for a relative swipe. Omit when using end.`,
+        `${movementSource === 'finger' ? 'Finger' : 'Pointer'} movement direction. Quick mapping: move the ${movementSource} or content upward -> "up"; downward -> "down"; leftward -> "left"; rightward -> "right". Required together with a positive distance for a relative swipe. Omit when using end.`,
       ),
     distance: z
       .number()
@@ -1290,6 +1322,9 @@ export function defineActionsFromInputPrimitives(
     }
     if (pointer.rightClick) {
       actions.push(defineActionRightClick(pointer.rightClick));
+    }
+    if (pointer.middleClick) {
+      actions.push(defineActionMiddleClick(pointer.middleClick));
     }
     if (pointer.hover) {
       actions.push(defineActionHover(pointer.hover));

@@ -11,5 +11,5 @@ export {
   type HarnessLocatorCall,
 } from './receipt';
 export { Browser, Page, Locator } from './vendor/bhjs/browser';
-export { SELECT_ALL_MODIFIER, typeKeys } from './keys';
+export { SELECT_ALL_MODIFIER, typeKeys } from './vendor/bhjs/interaction';
 export { Session, type ConnectOptions } from './vendor/bhjs/session';

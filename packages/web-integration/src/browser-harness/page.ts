@@ -592,9 +592,10 @@ export class BrowserHarnessPage extends AbstractWebPage {
    * Whether browser-harness-js can perform the operation on this element by
    * ref. False sends core down the coordinate path: operations the harness
    * has no guarded form of (double click, right click, hover, keys outside
-   * its allowlist), frames, and elements its guard does not operate (date
-   * pickers, sliders, ...). Refusals that depend on state (disabled, hidden,
-   * covered) answer true so `actOnRef` reports them as `blocked`.
+   * its allowlist), frames, and elements its guard does not operate (sliders,
+   * custom picker widgets, ...; native date and time inputs it does type).
+   * Refusals that depend on state (disabled, hidden, covered) answer true so
+   * `actOnRef` reports them as `blocked`.
    */
   async supportsRefOperation(
     match: TreeMatch,

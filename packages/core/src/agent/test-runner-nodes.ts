@@ -282,7 +282,11 @@ export const aiKeyboardPressInputSchema = z.strictObject({
 });
 
 export const aiScrollInputSchema = z.strictObject({
-  prompt: userPromptInputSchema.optional(),
+  prompt: userPromptInputSchema
+    .optional()
+    .describe(
+      'Optional locator for a currently visible scrollable container, such as "the product list". Omit for page scrolling. Describe the container, not a scrolling instruction or an off-screen target to find. Set direction, distance, and scrollType in options.',
+    ),
   options: locateOptionsInputSchema
     .extend({
       direction: z.enum(['down', 'up', 'right', 'left']).optional(),
@@ -467,6 +471,7 @@ type AgentActionNodeApi = Pick<
   | 'aiHover'
   | 'aiDoubleClick'
   | 'aiRightClick'
+  | 'aiMiddleClick'
   | 'aiLongPress'
   | 'aiClearInput'
   | 'aiPinch'
@@ -584,7 +589,12 @@ const aiAssertNode = defineCommonAgentNode({
 });
 
 const locateActionNode = (
-  method: 'aiHover' | 'aiDoubleClick' | 'aiRightClick' | 'aiClearInput',
+  method:
+    | 'aiHover'
+    | 'aiDoubleClick'
+    | 'aiRightClick'
+    | 'aiMiddleClick'
+    | 'aiClearInput',
 ) =>
   defineAgentActionNode({
     method,
@@ -592,6 +602,8 @@ const locateActionNode = (
       aiHover: 'Locate and hover over an element with a Midscene UI Agent.',
       aiDoubleClick:
         'Locate and double-click an element with a Midscene UI Agent.',
+      aiMiddleClick:
+        'Locate and middle-click an element with a Midscene UI Agent.',
       aiRightClick:
         'Locate and right-click an element with a Midscene UI Agent.',
       aiClearInput:
@@ -616,6 +628,7 @@ const additionalAgentNodes: readonly AgentTestRunnerNodeDefinition[] = [
   locateActionNode('aiHover'),
   locateActionNode('aiDoubleClick'),
   locateActionNode('aiRightClick'),
+  locateActionNode('aiMiddleClick'),
   locateActionNode('aiClearInput'),
   defineAgentActionNode({
     method: 'aiInput',

@@ -17,7 +17,7 @@ Some outcomes on the tree path:
 
 - **Disabled control**: the action is `blocked` and the step fails with the harness's reason (for example `disabled. Verify that with a check, or do what enables it first`). Midscene does not click it at coordinates.
 - **The page re-rendered the element** between locate and act: the device rebinds once to the single element with the same role, name and container in a fresh snapshot (`receipt.rebound`). If there is no unique one, the receipt is `stale` and Midscene acts once at the located coordinates.
-- **Operations the harness has no guarded form of** (hover, double click, right click, key combinations other than single keys such as `Enter` or `Escape`) and elements its guard does not operate (date pickers, sliders): the element is still located from the tree, and the action runs at its coordinates.
+- **Operations the harness has no guarded form of** (hover, double click, right click, key combinations other than single keys such as `Enter` or `Escape`) and elements its guard does not operate (sliders, custom picker widgets; native date and time inputs are typed through the guard): the element is still located from the tree, and the action runs at its coordinates.
 - **Elements inside iframes** count toward the match, but are never bound from the tree: the harness acts on the top-level document only, so these fall back to vision.
 
 The tree is read once per page state: the snapshot is reused until the page navigates, an action runs, or the document mutates.
