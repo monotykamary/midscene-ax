@@ -9,6 +9,7 @@ export {
   type PuppeteerBrowserAgentOpt,
 } from './browser-agent';
 export { PuppeteerWebPage } from './page';
+export { foldedPopupOf, setKeepPopups } from './base-page';
 export type { WebPageAgentOpt } from '@/web-element';
 export { overrideAIConfig } from '@midscene/shared/env';
 

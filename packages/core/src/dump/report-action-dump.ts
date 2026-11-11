@@ -12,6 +12,7 @@ import type {
   IExecutionDump,
   IReportActionDump,
 } from '../types';
+import { redactDumpJsonValue } from './redaction';
 import { restoreImageReferences } from './screenshot-restoration';
 import {
   type ImageUrlRef,
@@ -73,7 +74,9 @@ function replacerForDumpSerialization(key: string, value: any): any {
   if (isCustomSerializableObject(value)) {
     return value.toSerializable();
   }
-  return value;
+  // Every string in the dump passes through here, so host-registered
+  // redaction hangs off this one point. See ./redaction.ts.
+  return redactDumpJsonValue(key, value);
 }
 
 function stringifyDump(data: unknown, indents?: number): string {
@@ -344,7 +347,8 @@ export class ReportActionDump implements IReportActionDump {
     };
 
     const data = processValue(this.toJSON());
-    return JSON.stringify(data, null, indents);
+    // Same redaction as serialize(); this path builds its own plain object.
+    return JSON.stringify(data, redactDumpJsonValue, indents);
   }
 
   /**
