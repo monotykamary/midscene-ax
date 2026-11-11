@@ -1,6 +1,7 @@
 import type { ScreenshotItem } from '@/screenshot-item';
 import { setTimingFieldOnce } from '@/task-timing';
 import {
+  type ActionExecutionSuspension,
   ExecutionDump,
   type ExecutionRecorderItem,
   type ExecutionTask,
@@ -23,6 +24,39 @@ import { assert, uuid } from '@midscene/shared/utils';
 
 const debug = getDebug('task-runner');
 const UI_CONTEXT_CACHE_TTL_MS = 300;
+
+function nativeObservationSuspension(
+  error: unknown,
+): ActionExecutionSuspension | undefined {
+  if (!error || typeof error !== 'object') return undefined;
+  const value = error as {
+    code?: unknown;
+    suspension?: Partial<ActionExecutionSuspension>;
+  };
+  const suspension = value.suspension;
+  if (
+    value.code !== 'NATIVE_DIALOG_OBSERVATION_INTERRUPTED' ||
+    !suspension ||
+    suspension.status !== 'suspended' ||
+    suspension.reason !== 'native-dialog' ||
+    suspension.commandPending !== false ||
+    typeof suspension.continuationId !== 'string' ||
+    !/^[A-Za-z0-9_-]{1,128}$/.test(suspension.continuationId) ||
+    !['alert', 'confirm', 'prompt', 'beforeunload'].includes(
+      suspension.dialogType as string,
+    )
+  ) {
+    return undefined;
+  }
+  return Object.freeze({
+    status: 'suspended',
+    reason: 'native-dialog',
+    continuationId: suspension.continuationId,
+    dialogType:
+      suspension.dialogType as ActionExecutionSuspension['dialogType'],
+    commandPending: false,
+  });
+}
 
 function serializeTaskError(
   error: unknown,
@@ -50,7 +84,8 @@ export type TaskRunnerEventKind =
   | 'start'
   | 'finish'
   | 'error'
-  | 'cancel';
+  | 'cancel'
+  | 'suspend';
 
 export interface TaskRunnerEvent {
   kind: TaskRunnerEventKind;
@@ -135,7 +170,7 @@ export class TaskRunner {
   tasks: ExecutionTask[];
 
   // status of runner
-  status: 'init' | 'pending' | 'running' | 'completed' | 'error';
+  status: 'init' | 'pending' | 'running' | 'completed' | 'error' | 'suspended';
 
   onTaskStart?: ExecutionTaskProgressOptions['onTaskStart'];
 
@@ -243,6 +278,7 @@ export class TaskRunner {
       const uiContext = await this.getUiContext({ forceRefresh: true });
       return uiContext?.screenshot;
     } catch (error) {
+      if (nativeObservationSuspension(error)) throw error;
       console.error('error while capturing screenshot', error);
     }
     return undefined;
@@ -283,6 +319,11 @@ export class TaskRunner {
     options?: TaskRunnerOperationOptions,
     errorMessage?: string,
   ): void {
+    if (this.status === 'suspended') {
+      throw new Error(
+        'task runner is suspended; continuation must be handled externally without replay',
+      );
+    }
     if (this.status !== 'error') {
       return;
     }
@@ -323,14 +364,26 @@ export class TaskRunner {
   async appendAndFlush(
     task: ExecutionTaskApply[] | ExecutionTaskApply,
     options?: TaskRunnerOperationOptions,
-  ): Promise<{ output: any; thought?: string } | undefined> {
+  ): Promise<
+    | {
+        output: any;
+        thought?: string;
+        suspension?: ActionExecutionSuspension;
+      }
+    | undefined
+  > {
     await this.append(task, options);
     return this.flush(options);
   }
 
-  async flush(
-    options?: TaskRunnerOperationOptions,
-  ): Promise<{ output: any; thought?: string } | undefined> {
+  async flush(options?: TaskRunnerOperationOptions): Promise<
+    | {
+        output: any;
+        thought?: string;
+        suspension?: ActionExecutionSuspension;
+      }
+    | undefined
+  > {
     if (this.status === 'init' && this.tasks.length > 0) {
       console.warn(
         'illegal state for task runner, status is init but tasks are not empty',
@@ -353,6 +406,7 @@ export class TaskRunner {
     await this.emitSnapshotChange();
     let taskIndex = nextPendingIndex;
     let successfullyCompleted = true;
+    let suspension: ActionExecutionSuspension | undefined;
 
     let previousFindOutput: ExecutionTaskPlanningLocateOutput | undefined;
 
@@ -363,6 +417,9 @@ export class TaskRunner {
         `task status should be pending, but got: ${task.status}`,
       );
       let taskStarted = false;
+      let observationBoundary = false;
+      let executorCompleted = false;
+      let returnValue: Awaited<ReturnType<typeof task.executor>>;
       try {
         this.abortSignal?.throwIfAborted();
         taskStarted = true;
@@ -387,12 +444,13 @@ export class TaskRunner {
         const { executor } = task;
         assert(executor, `executor is required for task type: ${task.type}`);
 
-        let returnValue;
         // For Insight tasks (Query/Assert/WaitFor), always get fresh context
         // to ensure we have the latest UI state after any preceding actions
         const forceRefresh = task.type === 'Insight';
         setTimingFieldOnce(task.timing, 'getUiContextStart');
+        observationBoundary = task.type !== 'Insight';
         const uiContext = await this.getUiContext({ forceRefresh });
+        observationBoundary = false;
         setTimingFieldOnce(task.timing, 'getUiContextEnd');
         this.abortSignal?.throwIfAborted();
 
@@ -438,12 +496,25 @@ export class TaskRunner {
           returnValue = await task.executor(executorContext);
         }
 
+        executorCompleted = true;
+        if (task.type === 'Action Space' && returnValue?.suspendPlanning) {
+          suspension = returnValue.suspendPlanning;
+          Object.assign(task, returnValue);
+          task.status = 'suspended';
+          task.timing.end = Date.now();
+          task.timing.cost = task.timing.end - task.timing.start;
+          await this.emitSnapshotChange();
+          await this.emitTaskEvent('suspend', task);
+          break;
+        }
         this.abortSignal?.throwIfAborted();
         const isLastTask = taskIndex === this.tasks.length - 1;
 
         if (isLastTask) {
           setTimingFieldOnce(task.timing, 'captureAfterCallingSnapshotStart');
+          observationBoundary = true;
           const screenshot = await this.captureScreenshot();
+          observationBoundary = false;
           this.abortSignal?.throwIfAborted();
           this.attachRecorderItem(task, screenshot, 'after-calling');
           setTimingFieldOnce(task.timing, 'captureAfterCallingSnapshotEnd');
@@ -460,6 +531,25 @@ export class TaskRunner {
         await this.emitTaskEvent('finish', task);
         taskIndex++;
       } catch (error) {
+        const observation =
+          observationBoundary && task.type !== 'Insight'
+            ? nativeObservationSuspension(error)
+            : undefined;
+        if (observation) {
+          suspension = observation;
+          if (executorCompleted) Object.assign(task, returnValue);
+          task.observationSuspension = observation;
+          task.status = executorCompleted ? 'finished' : 'cancelled';
+          task.timing ??= { start: Date.now() };
+          task.timing.end = Date.now();
+          task.timing.cost = task.timing.end - task.timing.start;
+          await this.emitSnapshotChange();
+          await this.emitTaskEvent(
+            executorCompleted ? 'finish' : 'cancel',
+            task,
+          );
+          break;
+        }
         successfullyCompleted = false;
         const serializedError = serializeTaskError(error, this.abortSignal);
         task.error = serializedError;
@@ -491,7 +581,10 @@ export class TaskRunner {
     }
 
     let finalizeError: TaskExecutionError | undefined;
-    if (!successfullyCompleted) {
+    if (suspension && successfullyCompleted) {
+      this.status = 'suspended';
+      await this.emitSnapshotChange();
+    } else if (!successfullyCompleted) {
       this.status = 'error';
       const errorTask = this.latestErrorTask();
       const error =
@@ -523,8 +616,13 @@ export class TaskRunner {
       return {
         thought,
         output,
+        ...(suspension ? { suspension } : {}),
       };
     }
+  }
+
+  isSuspended(): boolean {
+    return this.status === 'suspended';
   }
 
   isInErrorState(): boolean {

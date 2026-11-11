@@ -523,7 +523,17 @@ const aiActNode = defineCommonAgentNode({
     ];
   },
   toResult(output) {
-    return output === undefined ? undefined : { summary: output };
+    if (output === undefined) return undefined;
+    if (typeof output === 'string') return { summary: output };
+    // This declarative node has no continuation owner. Never turn a suspended
+    // action into a successful node and dispatch the next workflow action.
+    const interrupted = Object.assign(
+      new Error(
+        'Native dialog continuation must be handled before this workflow can continue',
+      ),
+      { code: 'ACTION_EXECUTION_SUSPENDED', suspension: output },
+    );
+    throw new NodeExecutionError('aiAct', interrupted, { data: output });
   },
 });
 

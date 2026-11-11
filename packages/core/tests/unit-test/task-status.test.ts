@@ -54,6 +54,7 @@ describe('deriveTaskStatus', () => {
     expect(deriveTaskStatus({ status: 'pending' })).toBe('pending');
     expect(deriveTaskStatus({ status: 'running' })).toBe('running');
     expect(deriveTaskStatus({ status: 'cancelled' })).toBe('cancelled');
+    expect(deriveTaskStatus({ status: 'suspended' })).toBe('suspended');
   });
 });
 
@@ -90,6 +91,38 @@ describe('deriveCaseStatus', () => {
         },
       ]),
     ).toBe('passed');
+  });
+
+  it('derives interrupted for suspended action or observation tasks', () => {
+    expect(deriveCaseStatus([{ tasks: [{ status: 'suspended' }] }])).toBe(
+      'interrupted',
+    );
+    expect(
+      deriveCaseStatus([
+        {
+          tasks: [
+            {
+              status: 'finished',
+              observationSuspension: {
+                status: 'suspended',
+                reason: 'native-dialog',
+                commandPending: false,
+                continuationId: 'continuation-1',
+                dialogType: 'alert',
+              },
+            },
+          ],
+        },
+      ]),
+    ).toBe('interrupted');
+  });
+
+  it('keeps failures higher precedence than interruption', () => {
+    expect(
+      deriveCaseStatus([
+        { tasks: [{ status: 'suspended' }, { status: 'failed' }] },
+      ]),
+    ).toBe('failed');
   });
 
   it('handles empty / task-less executions', () => {

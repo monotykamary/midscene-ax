@@ -1,6 +1,11 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 export type InteractionScope = { sessionId: string };
+/** A target's required context, fixed when observed and never supplied by act(). */
+export type ScopeBinding =
+  | { kind: 'layout'; rootSelector: string; contextText: string }
+  | { kind: 'semantic'; rootBackendNodeId: number; role: string; name: string }
+  | { kind: 'identity'; rootBackendNodeId: number };
 export type InteractionSession = {
   _call(method: string, params: unknown, opts: { sessionId: string; expectedGeneration?: number }): Promise<unknown>;
   onEvent?(fn: (method: string, params: any, sessionId?: string) => void): () => void;
@@ -30,10 +35,7 @@ export type InteractionObservation = {
   title: string;
   truncated: boolean;
   truncation: { elements: boolean; scan: boolean; text: boolean };
-  /**
-   * Single-target observations only: why the requested target was not offered, and the
-   * next move. Diagnosis only; it never makes the target actionable.
-   */
+  /** Diagnosis only; never grants action authority. */
   refusal?: string;
 };
 export type InteractionAction = {
@@ -46,11 +48,24 @@ export type InteractionAction = {
   /** `press` (trusted input only): one of PRESS_KEYS. */
   key?: string;
 };
+export type InteractionCommit = {
+  verified: boolean | null;
+  source: 'editor' | 'display' | null;
+  blurred: boolean | null;
+  before?: string;
+  after?: string;
+  masked?: boolean;
+  reason?: string;
+  /** Host-private: always non-enumerable, never serialized in a receipt. */
+  secretVariants?: string[];
+};
 export type InteractionReceipt = {
   status: 'executed' | 'stale' | 'blocked' | 'outcome_unknown';
   reason?: string;
   /** `type` into a native date or time control: the value it should hold, in the control's own format. */
   expected?: string;
+  /** Immediate readback from the live owned editor; not a blur/persistence check. */
+  verified?: boolean | null;
 };
 /**
  * `synthetic` (default) activates controls through the DOM: `element.click()` and a
@@ -79,6 +94,7 @@ export type InteractionOptions = {
   maskSensitive?: boolean;
 };
 
+
 type Options = { signal?: AbortSignal };
 type RecordState = {
   objectId: string;
@@ -88,6 +104,7 @@ type RecordState = {
   observation: InteractionObservation;
   targets: Map<string, number>;
   consumed: boolean;
+  typedTarget?: { index: number; text: string };
   maxElements: number;
 };
 type PageReceipt =
@@ -201,7 +218,7 @@ export class InteractionController {
   }
 
   async observe(
-    input: { scope: InteractionScope; maxElements?: number; backendNodeId?: number },
+    input: { scope: InteractionScope; maxElements?: number; backendNodeId?: number; scopeBinding?: ScopeBinding; scopeRootBackendNodeId?: number },
     options: Options = {},
   ): Promise<InteractionObservation> {
     const sid = this.scopeId(input.scope);
@@ -214,7 +231,17 @@ export class InteractionController {
     if (backendNodeId !== undefined && (!Number.isSafeInteger(backendNodeId) || backendNodeId < 1)) {
       throw new Error('backendNodeId must be a positive safe integer');
     }
-    return this.serial(sid, () => this.snapshot(sid, max, signal, backendNodeId), signal);
+    const binding = input.scopeBinding ? Object.freeze({ ...input.scopeBinding }) : undefined;
+    const rootId = input.scopeRootBackendNodeId ?? (binding && binding.kind !== 'layout' ? binding.rootBackendNodeId : undefined);
+    if (binding && (backendNodeId === undefined ||
+        (binding.kind === 'layout' ? !binding.rootSelector || !binding.contextText || binding.rootSelector.length > 4096 || binding.contextText.length > 4096 :
+          !['semantic', 'identity'].includes(binding.kind) || !Number.isSafeInteger(binding.rootBackendNodeId) || binding.rootBackendNodeId < 1 ||
+          (binding.kind === 'semantic' && (!binding.role || !binding.name || binding.role.length > 256 || binding.name.length > 4096))))) {
+      throw new Error('Invalid scope binding');
+    }
+    if (rootId !== undefined && (!Number.isSafeInteger(rootId) || rootId < 1)) throw new Error('Invalid scope root');
+    if (binding && binding.kind !== 'layout' && rootId !== binding.rootBackendNodeId) throw new Error('Scope root mismatch');
+    return this.serial(sid, () => this.snapshot(sid, max, signal, backendNodeId, binding, rootId), signal);
   }
 
   async act(
@@ -277,12 +304,22 @@ export class InteractionController {
           if (this.input !== 'trusted') throw new Error('Unexpected trusted receipt');
           // The page rechecked the target at this point; dispatch without another round trip.
           const how = await this.dispatchInput(sid, record, index, receipt, action, signal);
-          receipt = { status: 'executed', reason: how ?? 'dispatched_not_verified', ...(receipt.expected !== undefined ? { expected: receipt.expected } : {}) };
+          receipt = { status: 'executed', reason: how.reason ?? 'dispatched_not_verified', ...(how.verified !== undefined ? { verified: how.verified } : {}), ...(receipt.expected !== undefined ? { expected: receipt.expected } : {}) };
         }
         if (!['executed', 'stale', 'blocked'].includes(receipt?.status)) throw new Error('Invalid action receipt');
+        if (receipt.status === 'executed' && action.operation === 'type') {
+          const owner = await this.call(sid, 'Runtime.callFunctionOn', {
+            objectId: record.objectId, functionDeclaration: 'function(index) { return this.typedOwnerValid(index); }',
+            arguments: [{value:index}], returnByValue:true,
+          }, record.generation, signal);
+          if (this.value(owner) !== true) return { status: 'outcome_unknown', reason: 'scope_changed_during_type' };
+        }
         // Navigation may be a legitimate effect. Never turn a dispatched action into a retryable stale receipt.
         if (!this.current(sid, record) || signal.aborted) {
           return { status: 'outcome_unknown', reason: 'changed_during_dispatch' };
+        }
+        if (receipt.status === 'executed' && action.operation === 'type') {
+          record.typedTarget = { index, text: receipt.expected ?? action.payload as string };
         }
         return receipt as InteractionReceipt;
       } catch {
@@ -295,6 +332,38 @@ export class InteractionController {
       status: dispatched ? 'outcome_unknown' : 'blocked',
       reason: signal.aborted ? 'cancelled' : 'capacity_exceeded',
     }));
+  }
+
+  /** One-shot, opt-in commit of this observation's successful fill, before any new observation. */
+  async commitTypedValue(
+    input: { scope: InteractionScope; observationId: string; targetId: string; sensitive?: boolean },
+    options: Options = {},
+  ): Promise<InteractionCommit> {
+    const sid = this.scopeId(input.scope), signal = this.signal(options);
+    const observationId = input.observationId, targetId = input.targetId, sensitive = input.sensitive === true;
+    const unknown = (reason: string): InteractionCommit => ({ verified: null, source: null, blurred: null, reason });
+    return this.serial(sid, async () => {
+      const record = this.records.get(sid);
+      if (!record || !this.current(sid, record) || record.observation.observationId !== observationId ||
+          record.targets.get(targetId) !== record.typedTarget?.index || !record.typedTarget) return unknown('commit_expired');
+      const { index, text } = record.typedTarget;
+      record.typedTarget = undefined; // Never blur twice, even if cancellation makes the effect unknown.
+      try {
+        const raw = this.value(await this.call(sid, 'Runtime.callFunctionOn', {
+          objectId: record.objectId,
+          functionDeclaration: 'function(index, expected, sensitive) { return this.commitTypedValue(index, expected, sensitive); }',
+          arguments: [{value:index}, {value:text}, {value:sensitive}], returnByValue:true, awaitPromise:true,
+        }, record.generation, signal));
+        if (!this.current(sid, record) || signal.aborted) return unknown('commit_changed');
+        if (!raw || ![true, false, null].includes(raw.verified)) return unknown('commit_unavailable');
+        const variants = raw.variants; delete raw.variants;
+        if (Array.isArray(variants)) Object.defineProperty(raw, 'secretVariants', {
+          value: variants.filter((value: unknown) => typeof value === 'string' && value.length <= MAX_TEXT_LENGTH).slice(0, 3),
+          enumerable: false,
+        });
+        return raw as InteractionCommit;
+      } catch { return unknown('commit_unconfirmed'); }
+    }, signal).catch(() => unknown(signal.aborted ? 'commit_cancelled' : 'commit_unavailable'));
   }
 
   async waitForChange(
@@ -370,7 +439,7 @@ export class InteractionController {
     ready: { input: 'click' | 'type' | 'press'; x: number; y: number; keys?: string; expected?: string },
     action: { payload?: string | number },
     signal: AbortSignal,
-  ): Promise<string | undefined> {
+  ): Promise<{ reason?: string; verified?: boolean | null }> {
     const generation = record.generation;
     const send = (method: string, params: unknown) => this.call(sid, method, params, generation, signal);
     const guard = async (method: string, ...args: unknown[]) => this.value(await this.call(sid, 'Runtime.callFunctionOn', {
@@ -378,6 +447,7 @@ export class InteractionController {
       functionDeclaration: `function(...args) { return this.${method}(...args); }`,
       arguments: args.map(value => ({ value })),
       returnByValue: true,
+      awaitPromise: true,
     }, generation, signal));
     const click = async () => {
       if (!Number.isFinite(ready.x) || !Number.isFinite(ready.y)) throw new Error('Invalid click point');
@@ -390,26 +460,41 @@ export class InteractionController {
       await click();
     } else if (ready.input === 'type' && ready.keys !== undefined) {
       // A native date control: the page focused its first segment; type each segment, then confirm the value.
-      await typeKeys(send, ready.keys);
+      const dateInput = async (method: string, params: any) => {
+        if ((method === 'Input.insertText' || params.type === 'keyDown' || params.type === 'rawKeyDown') &&
+            !await guard('checkDateEditor', index)) throw new Error('Date editor ownership changed');
+        return send(method, params);
+      };
+      await typeKeys(dateInput, ready.keys);
       const confirmed = await guard('confirmValue', index, ready.expected);
-      return confirmed === 'set' ? 'typed_segments_not_accepted: value_set_synthetically' : confirmed === 'typed' ? 'typed_keys' : undefined;
+      if (confirmed !== 'set' && confirmed !== 'typed') throw new Error('Date field changed during confirmation');
+      return { reason: confirmed === 'set' ? 'typed_segments_not_accepted: value_set_synthetically' : confirmed === 'typed' ? 'typed_keys' : undefined };
     } else if (ready.input === 'type') {
       const text = action.payload as string;
       await click();
       const focused = await guard('ensureFocus', index);
       if (focused === false) throw new Error('Field did not take focus');
+      if (!await guard('checkEditor', index)) throw new Error('Editor ownership changed');
       await send('Input.dispatchKeyEvent', { type: 'rawKeyDown', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: SELECT_ALL_MODIFIER, commands: ['selectAll'] });
       await send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'a', code: 'KeyA', windowsVirtualKeyCode: 65, modifiers: SELECT_ALL_MODIFIER });
-      if (!text) await pressKey(send, 'Delete');
+      if (!await guard('checkEditor', index, true)) throw new Error('Replacement selection not owned');
+      // Recheck before each text-producing event: page key handlers can move focus
+      // or replace an editor. Never retry or finish a partial edit in another node.
+      const edit = async (method: string, params: any) => {
+        if ((method === 'Input.insertText' || params.type === 'keyDown' || params.type === 'rawKeyDown') &&
+            !await guard('checkEditor', index)) throw new Error('Editor ownership changed');
+        return send(method, params);
+      };
+      if (!text) await pressKey(edit, 'Delete');
       // A long text is pasted, as a person would paste it.
-      else if (text.length > MAX_TYPED_LENGTH) await send('Input.insertText', { text });
-      else await typeKeys(send, text);
+      else if (text.length > MAX_TYPED_LENGTH) await edit('Input.insertText', { text });
+      else await typeKeys(edit, text);
       const how = text.length > MAX_TYPED_LENGTH ? 'pasted' : 'typed_keys';
-      return focused === 'scripted' ? `${how}: focus_set_by_script` : how;
+      return { reason: focused === 'scripted' ? `${how}: focus_set_by_script` : how, verified: await guard('verifyTypedValue', index, text) };
     } else {
       await pressKey(send, action.payload as string);
     }
-    return undefined;
+    return {};
   }
 
   private scopeId(scope: InteractionScope): string {
@@ -516,7 +601,7 @@ export class InteractionController {
     void pending.catch(() => {}).finally(() => this.releases.delete(pending));
   }
 
-  private async snapshot(sid: string, max: number, signal: AbortSignal, backendNodeId?: number): Promise<InteractionObservation> {
+  private async snapshot(sid: string, max: number, signal: AbortSignal, backendNodeId?: number, binding?: ScopeBinding, rootId?: number): Promise<InteractionObservation> {
     signal.throwIfAborted();
     if ((!this.epochs.has(sid) && this.epochs.size >= MAX_SCOPES) || this.releases.size >= MAX_SCOPES) {
       throw new Error('Interaction retained scope capacity exceeded; invalidate unused scopes');
@@ -527,6 +612,7 @@ export class InteractionController {
     const generation = this.session.getConnectionGeneration?.();
     let objectId: string | undefined;
     let targetObject: string | undefined;
+    let rootObject: string | undefined;
     try {
       await this.call(sid, 'Page.enable', {}, generation, signal);
       if (this.input === 'trusted') {
@@ -544,17 +630,22 @@ export class InteractionController {
         targetObject = resolved.object?.objectId;
         if (!targetObject) throw new Error('Target unavailable');
       }
+      if (rootId !== undefined) {
+        const resolved = await this.call(sid, 'DOM.resolveNode', { backendNodeId: rootId, executionContextId: world.executionContextId }, generation, signal);
+        rootObject = resolved.object?.objectId;
+        if (!rootObject) throw new Error('stale_ref: scope root unavailable');
+      }
       const sensitive = this.sensitiveGranted();
       const mask = sensitive && this.maskSensitive;
       const evaluated = targetObject
         ? await this.call(sid, 'Runtime.callFunctionOn', {
           objectId: targetObject,
-          functionDeclaration: `function(origins, max, trusted, sensitive, mask) { return (${projection})(origins, max, trusted, sensitive, mask, this); }`,
-          arguments: [{ value: this.origins }, { value: max }, { value: this.input === 'trusted' }, { value: sensitive }, { value: mask }],
+          functionDeclaration: `function(origins, max, trusted, binding, root) { return (${projectionFor(sensitive, mask)})(origins, max, trusted, this, binding, root); }`,
+          arguments: [{ value: this.origins }, { value: max }, { value: this.input === 'trusted' }, { value: binding ?? null }, rootObject ? { objectId: rootObject } : { value: null }],
           objectGroup: 'browser-harness-guard', awaitPromise: true,
         }, generation, signal)
         : await this.call(sid, 'Runtime.evaluate', {
-          expression: `(${projection})(${JSON.stringify(this.origins)}, ${max}, ${this.input === 'trusted'}, ${sensitive}, ${mask})`,
+          expression: `(${projectionFor(sensitive, mask)})(${JSON.stringify(this.origins)}, ${max}, ${this.input === 'trusted'})`,
           contextId: world.executionContextId, objectGroup: 'browser-harness-guard', awaitPromise: true,
         }, generation, signal);
       objectId = evaluated.result?.objectId;
@@ -564,6 +655,7 @@ export class InteractionController {
         functionDeclaration: 'function() { return this.snapshot; }',
         returnByValue: true,
       }, generation, signal));
+      if (data.scopeInvalid) throw new Error('stale_ref: scope changed');
       if (data.denied || !this.allowed(data.url)) throw new Error('origin_denied');
       const after = await this.frame(sid, generation, signal);
       if (after.key !== frame.key || this.epochs.get(sid) !== epoch ||
@@ -604,6 +696,7 @@ export class InteractionController {
       throw error;
     } finally {
       if (targetObject) this.release(sid, targetObject, generation);
+      if (rootObject) this.release(sid, rootObject, generation);
     }
   }
 }
@@ -693,8 +786,8 @@ function abortable<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 // Runs in a CDP isolated world: page-defined prototypes cannot replace these guards.
 // Bounded controls from the document and its open shadow roots, with an explicit role
 // allowlist, plus scrollable regions. Not a complete accessibility tree; trusted input
-// and sensitive fields are opt-in host grants.
-const projection = String.raw`async function(allowedOrigins, maxElements, trustedInput, allowSensitive, maskSensitive, target) {
+// is opt-in and dispatched by the host.
+const projectionSource = String.raw`async function(allowedOrigins, maxElements, trustedInput, target, binding, boundRoot) {
   const doc = document;
   const url = location.href;
   if (!allowedOrigins.includes(location.origin)) return { snapshot: { denied: true } };
@@ -709,10 +802,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
   const TEXT_ROLES = ['textbox', 'searchbox', 'combobox'];
   const CHECKED_ROLES = ['checkbox', 'radio', 'switch', 'menuitemcheckbox', 'menuitemradio'];
   const SELECTED_ROLES = ['option', 'tab', 'treeitem'];
-  // Password, e-mail and phone inputs are text fields too, offered only under the host's sensitive grant.
-  const TEXT_INPUT_TYPES = allowSensitive
-    ? ['text', 'search', 'url', 'number', 'password', 'email', 'tel']
-    : ['text', 'search', 'url', 'number'];
+  const TEXT_INPUT_TYPES = ['text', 'search', 'url', 'number', 'password', 'email', 'tel'];
   // Native date and time controls: a value field whose text a person types segment by segment.
   const DATE_INPUT_TYPES = ['date', 'time', 'datetime-local', 'month', 'week'];
   const IDENTITY_ATTRIBUTES = ['id', 'name', 'type', 'href', 'role', 'for', 'form', 'action'];
@@ -728,7 +818,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     const root = typeof node.getRootNode === 'function' ? node.getRootNode() : null;
     return root && root !== doc && root.host ? root.host : null;
   };
-  const composedParent = node => node.parentElement || shadowHost(node);
+  const composedParent = node => node.assignedSlot || node.parentElement || shadowHost(node);
   const closestComposed = (el, selector) => {
     for (let node = el; node; node = shadowHost(node)) {
       const found = node.closest(selector);
@@ -762,14 +852,13 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
       if (x < 0 || y < 0 || x >= innerWidth || y >= innerHeight) continue;
       const hit = deepHit(x, y);
       if (hit && (hit === scope || scope.contains(hit) || composedContains(scope, hit))) return { x, y };
-      // A closed shadow root cannot be entered from a script, so the hit stops at its host. A hit on
+      // flow-pilot patch: a closed shadow root cannot be entered from a script, so the hit stops at its host. A hit on
       // the host whose closed root composes the target is the target's own component, not a cover.
       if (hit && !hit.shadowRoot && closedHostOf(scope, hit)) return { x, y };
     }
     return null;
   };
   const closedHostOf = (node, host) => {
-    if (typeof node.getRootNode !== 'function') return false;
     for (let root = node.getRootNode(); root && root.host; root = root.host.getRootNode()) if (root.host === host) return true;
     return false;
   };
@@ -794,7 +883,6 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
   };
 
   const sensitiveName = /pass(?:word|code|phrase)?|secret|token|api[\s_-]*key|auth|credential|security|user[\s_-]*name|login|full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|surname|otp|one[\s_-]*time|mfa|2fa|\bpin\b|ssn|social[\s_-]*security|credit|card|cvv|cvc|iban|routing|account|bank|birth|\bdob\b|e[\s_-]*mail|phone|\btel\b|mobile|address|postal|zip/i;
-  // Credential and personal-data fields, judged whatever the host granted.
   const sensitiveField = el => {
     if (el.type === 'password' || el.hasAttribute('data-private') || el.hasAttribute('data-sensitive')) return true;
     const autocomplete = el.getAttribute('autocomplete') || '';
@@ -814,6 +902,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     }
     return false;
   };
+
   // Without the host's grant, credential and personal-data fields are never offered.
   const secure = el => !allowSensitive && sensitiveField(el);
   const privateMarked = el => !allowSensitive && !!closestComposed(el, '[data-private], [data-sensitive]');
@@ -833,12 +922,17 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     return { role: ['checkbox', 'radio'].includes(el.type) ? el.type : 'button', kind: 'click' };
   };
 
+  const editingHost = el => el.isContentEditable === true && !el.parentElement?.isContentEditable;
+  const readOnly = el => !!el.readOnly || !!closestComposed(el, '[aria-readonly="true"], [readonly]');
+
   // An explicit role must be allowlisted; unknown roles are not guessed at.
   const roleOf = el => {
     const base = native(el);
     const explicit = (el.getAttribute('role') || '').trim().toLowerCase().split(/\s+/)[0];
-    if (!explicit) return base;
-    const editable = el.isContentEditable === true;
+    if (!explicit) return base || (editingHost(el) ? { role: 'textbox', kind: 'editable' } : null);
+    const editable = editingHost(el);
+    // A gridcell owns the editor it activates, not an arbitrary focused field.
+    if (explicit === 'gridcell') return { role: explicit, kind: base?.kind === 'value' ? 'value' : 'editable' };
     if (TEXT_ROLES.includes(explicit)) {
       if (base && base.kind === 'value') return { role: explicit, kind: 'value' };
       if (base && base.kind === 'select') return { role: explicit, kind: 'select' };
@@ -904,6 +998,25 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     return parts.join(' ').replace(/\s+/g, ' ').trim();
   };
 
+  // Capture the actual node once. Never accept an identical replacement at the selector.
+  const scopeRoot = boundRoot || (binding?.kind === 'layout' ? (() => {
+    const roots = doc.querySelectorAll(binding.rootSelector); return roots.length === 1 ? roots[0] : null;
+  })() : null);
+  const normalizeScope = value => String(value || '').replace(/\s+/g, ' ').trim();
+  const scopeRole = el => (el.getAttribute('role') || '').trim().split(/\s+/)[0] ||
+    ({ ...IMPLICIT_GROUPS, ARTICLE: 'article', UL: 'list', OL: 'list', LI: 'listitem', TR: 'row', TD: 'cell', TH: 'columnheader', ASIDE: 'complementary', MAIN: 'main' })[el.tagName] || 'generic';
+  const scopeName = el => {
+    const legend = el.tagName === 'FIELDSET' ? el.querySelector('legend') : el.tagName === 'TABLE' ? el.querySelector('caption') : null;
+    return normalizeScope(labelledBy(el) || el.getAttribute('aria-label') || legend?.textContent ||
+      (['row', 'cell', 'columnheader', 'rowheader', 'listitem'].includes(scopeRole(el)) ? contentName(el) : '') || el.getAttribute('title'));
+  };
+  const scopeValid = element => !binding || Boolean(scopeRoot?.isConnected && scopeRoot.ownerDocument === doc &&
+    element?.isConnected && element.ownerDocument === doc && composedContains(scopeRoot, element) &&
+    (binding.kind === 'identity' || (binding.kind === 'layout'
+      ? normalizeScope(scopeRoot.innerText ?? scopeRoot.textContent).toLowerCase().includes(normalizeScope(binding.contextText).toLowerCase())
+      : scopeRole(scopeRoot) === binding.role && scopeName(scopeRoot) === normalizeScope(binding.name))));
+  if (binding && !scopeValid(target)) return { snapshot: { scopeInvalid: true } };
+
   // The nearest *named* grouping container: disambiguates repeated labels ("20" in two
   // month grids, "Done" in two dialogs). Unnamed containers are skipped, not guessed.
   const contextOf = el => {
@@ -921,6 +1034,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
 
   const semantics = el => {
     if (!(el instanceof HTMLElement) || secure(el) || privateMarked(el)) return null;
+    const mask = masked(el);
     const described = roleOf(el);
     if (!described) return null;
     const { role, kind } = described;
@@ -947,14 +1061,14 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     Object.defineProperty(result, 'fullName', { value: label.trim(), enumerable: false });
     if (kind === 'value') {
       if (tooLong(el.value, LIMITS.value)) return null;
-      result.value = el.value && masked(el) ? '[masked]' : el.value;
-      if (!el.readOnly) result.operations.push('type');
+      result.value = mask ? (el.value ? '[masked]' : '') : el.value;
+      if (!readOnly(el)) result.operations.push('type');
       if (role === 'combobox') result.operations.push('click');
     } else if (kind === 'editable') {
       if (tooLong(el.textContent, LIMITS.value)) return null;
-      result.value = el.textContent || '';
+      result.value = mask ? (el.textContent ? '[masked]' : '') : el.textContent || '';
       // A contenteditable value can only be replaced with real text input.
-      if (trustedInput) result.operations.push('type');
+      if (trustedInput && !readOnly(el)) result.operations.push('type');
     } else if (kind === 'select') {
       const options = Array.from(el.options || []);
       if (options.length > LIMITS.options) textTruncated = true;
@@ -988,12 +1102,10 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
       element.hidden || element.inert || element.getAttribute('aria-hidden') === 'true';
   };
 
-  // A native checkbox, radio, file input or select made fully transparent and laid over its
-  // own drawn proxy (a styled ring, box or upload button with pointer-events:none) is what a
-  // user's click reaches. Only its own opacity is excused: any other hidden reason, or a hidden
-  // ancestor, still hides it, and the hit test must still land on it. Other transparent
-  // controls stay hidden.
-  const transparentNative = el => {
+  // flow-pilot patch: a native checkbox, radio, file input or select made transparent and laid over its own styled
+  // proxy (a drawn ring or box with pointer-events:none) is what a user's click reaches. Only its own opacity may
+  // hide it; any other hidden reason, or a hidden ancestor, still does, and the hit test below must land on it.
+  const transparentProxy = el => {
     const native = (el.tagName === 'INPUT' && ['checkbox', 'radio', 'file'].includes(el.type)) || el.tagName === 'SELECT';
     if (!native) return false;
     const style = getComputedStyle(el);
@@ -1007,7 +1119,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     const rect = el.getBoundingClientRect();
     let rendered = rect.width > 0 && rect.height > 0;
     for (let parent = el; parent; parent = composedParent(parent)) {
-      if (isHidden(parent) && !(parent === el && transparentNative(el))) rendered = false;
+      if (isHidden(parent) && !(parent === el && transparentProxy(el))) rendered = false;
     }
     const visible = rendered && rect.x + rect.width > 0 && rect.y + rect.height > 0 &&
       rect.x < innerWidth && rect.y < innerHeight;
@@ -1093,7 +1205,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     if (referenced === null) return null;
     const name = (referenced || el.getAttribute('aria-label') || '').trim();
     if (!name && !SCROLL_ROLES.includes(role)) return null;
-    if (tooLong(name, LIMITS.text) || privateMarked(el)) return null;
+    if (tooLong(name, LIMITS.text) || closestComposed(el, '[data-private], [data-sensitive]')) return null;
     const rect = el.getBoundingClientRect();
     const x = rect.x + rect.width / 2;
     const y = rect.y + rect.height / 2;
@@ -1157,9 +1269,6 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
   }
   if (page && page.semantic.operations.length) refs.push({ element: scroller, kind: 'page', initial: page });
   const truncation = { elements: elementsTruncated, scan: scanned === LIMITS.scan, text: textTruncated };
-
-  // Why a requested target is not offered, and the next move. Diagnosis only: it re-reads the
-  // predicates above, after truncation is settled, and never makes anything actionable.
   const describe = node => {
     const id = node.getAttribute && node.getAttribute('id');
     const text = privateMarked(node) ? '' : (node.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 40);
@@ -1223,6 +1332,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     truncated: Object.values(truncation).some(Boolean),
     truncation,
   };
+
   if (target && !refs.length) snapshot.refusal = bounded(explain(target), LIMITS.text);
 
   const setValue = (element, text) => {
@@ -1286,31 +1396,166 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     const parts = { year, month, day };
     return dateOrder().map(type => parts[type]).join('');
   };
-  // Whether focus is on the element or inside it; its own root sees focus even inside a closed shadow root.
-  const activeIn = element => {
-    const own = element.getRootNode().activeElement;
-    if (own && (own === element || element.contains(own))) return true;
-    let active = doc.activeElement;
-    while (active && active.shadowRoot && active.shadowRoot.activeElement) active = active.shadowRoot.activeElement;
-    return active === element || (active !== null && element.contains(active));
+  const activeElement = element => {
+    let active = element.getRootNode().activeElement || doc.activeElement;
+    while (active?.shadowRoot?.activeElement) active = active.shadowRoot.activeElement;
+    return active;
   };
-
+  const ownedEditors = owner => {
+    // Search only the original target, including open shadow roots. A truncated
+    // search cannot establish uniqueness and must fail closed.
+    const found = [], pending = [[owner][Symbol.iterator]()];
+    let count = 0;
+    while (pending.length) {
+      const next = pending[pending.length - 1].next();
+      if (next.done) { pending.pop(); continue; }
+      if (++count > LIMITS.contentNodes || pending.length > LIMITS.contentDepth) return null;
+      const el = next.value;
+      const base = native(el);
+      if (editingHost(el) || base?.kind === 'value') {
+        const current = state(el);
+        if (!current || current.visible) found.push({ element: el, current });
+      }
+      pending.push(el.children[Symbol.iterator]());
+      if (el.shadowRoot) pending.push(el.shadowRoot.children[Symbol.iterator]());
+    }
+    return found;
+  };
+  const ownerReady = owner => allowedOrigins.includes(location.origin) && document === doc && location.href === url &&
+    owner?.isConnected && owner.ownerDocument === doc && scopeValid(owner) && !readOnly(owner) &&
+    !owner.matches(':disabled') && !closestComposed(owner, '[aria-disabled="true"], [inert]');
+  const editorReady = ref => {
+    if (!ownerReady(ref.element) || !ref.editor?.isConnected || !scopeValid(ref.editor) || !composedContains(ref.element, ref.editor)) return false;
+    const found = ownedEditors(ref.element);
+    return found?.length === 1 && found[0].element === ref.editor && found[0].current?.enabled &&
+      found[0].current.clear && !readOnly(ref.editor) && activeElement(ref.editor) === ref.editor;
+  };
+  const maskField = masked;
   let consumed = false;
   return { snapshot,
-  /** After a trusted click into a field: focus it from script only if the click did not (reported as 'scripted'). */
-  ensureFocus(index) {
-    const element = refs[index] && refs[index].element;
-    if (!element || !element.isConnected) return false;
-    if (activeIn(element)) return true;
-    HTMLElement.prototype.focus.call(element);
-    return activeIn(element) ? 'scripted' : false;
+  /** One activation, then a bounded wait for a unique editor within the live target. */
+  async ensureFocus(index) {
+    const ref = refs[index];
+    if (!ref) return false;
+    const deadline = performance.now() + 1000;
+    let scripted = false;
+    do {
+      if (!ownerReady(ref.element)) return false;
+      const found = ownedEditors(ref.element);
+      if (!found || found.length > 1) return false;
+      if (found.length === 1) {
+        const { element, current } = found[0];
+        if (!current?.enabled || !current.clear || readOnly(element)) return false;
+        const active = activeElement(element);
+        // A foreign focused editor is never a fallback. The click may deliberately
+        // leave focus on the owning cell while it mounts its child editor.
+        if (active !== element && active !== doc.body && active !== doc.documentElement &&
+            !composedContains(ref.element, active)) return false;
+        if (active !== element && !scripted) {
+          // Focus itself may mount a new editor. Never focus a second time: wait
+          // for that owned replacement to actually take focus, without reactivation.
+          HTMLElement.prototype.focus.call(element);
+          scripted = true;
+        }
+        ref.editor = element;
+        if (editorReady(ref)) return scripted ? 'scripted' : true;
+      }
+      await new Promise(resolve => setTimeout(resolve, 25));
+    } while (performance.now() < deadline);
+    return false;
+  },
+  typedOwnerValid(index) {
+    const ref = refs[index], owner = ref?.element;
+    if (!owner?.isConnected || owner.ownerDocument !== doc || document !== doc || location.href !== url ||
+        !allowedOrigins.includes(location.origin) || !scopeValid(owner)) return false;
+    // A last input may move the editor or its whole owner. Focus may legitimately
+    // advance, and masking says nothing about ownership, so neither is required.
+    return !ref.editor?.isConnected || (scopeValid(ref.editor) && composedContains(owner, ref.editor));
+  },
+  verifyTypedValue(index, expected) {
+    const ref = refs[index];
+    if (!ref?.editor || !ownerReady(ref.element)) return null;
+    // Reading may follow a remount, but must stay within the original connected
+    // owner. Never use the globally active element as verification evidence.
+    const found = ownedEditors(ref.element);
+    if (found?.length !== 1 || !found[0].current?.enabled || !found[0].current.clear) return null;
+    const editor = found[0].element;
+    if (!scopeValid(editor) || readOnly(editor) || secure(editor) || secure(ref.element) ||
+        masked(editor) || masked(ref.element) || privateMarked(editor)) return null;
+    return ('value' in editor ? editor.value : editor.textContent || '') === expected;
+  },
+  async commitTypedValue(index, expected, sensitive) {
+    const ref = refs[index];
+    let blurred = false;
+    const unknown = reason => ({ verified: null, source: null, blurred, reason });
+    if (!ref || !ownerReady(ref.element)) return unknown('commit_owner_changed');
+    const found = ownedEditors(ref.element);
+    if (found?.length !== 1) return unknown('commit_editor_ambiguous');
+    const editor = found[0].element;
+    if (!scopeValid(editor) || !found[0].current?.enabled || !found[0].current.clear ||
+        readOnly(editor) || activeElement(editor) !== editor) return unknown('commit_editor_not_focused');
+    const value = element => 'value' in element ? element.value : element.textContent || '';
+    const before = value(editor);
+    const masked = sensitive || maskField(ref.element) || maskField(editor) ||
+      secure(ref.element) || secure(editor) || privateMarked(editor);
+    if (!ownerReady(ref.element) || !scopeValid(editor)) return unknown('commit_scope_changed');
+    HTMLElement.prototype.blur.call(editor); blurred = true;
+    // A bounded post-blur observation window, not a claim about server persistence.
+    // Read the live subtree after the window; never the detached pre-blur editor.
+    await new Promise(resolve => setTimeout(resolve, 250));
+    if (!ownerReady(ref.element)) return unknown('commit_owner_changed');
+    const live = ownedEditors(ref.element);
+    if (!live || live.length > 1) return unknown('commit_readback_ambiguous');
+    let after, source;
+    if (live.length === 1) {
+      const current = live[0];
+      if (!scopeValid(current.element) || !current.current?.enabled || !current.current.visible || readOnly(current.element)) return unknown('commit_readback_unavailable');
+      after = value(current.element); source = 'editor';
+    } else {
+      // Only a whole gridcell has an unambiguous display value after editor teardown.
+      if (ref.element.getAttribute('role') !== 'gridcell' || !state(ref.element)?.visible ||
+          !scopeValid(ref.element)) return unknown('commit_display_unavailable');
+      after = ref.element.textContent || ''; source = 'display';
+    }
+    if (before.length > LIMITS.value || after.length > LIMITS.value) return unknown('commit_value_limit');
+    return { verified: masked ? null : after === expected, source, blurred, masked,
+      before: masked ? '[masked]' : before,
+      after: masked ? (after === before ? '[masked, unchanged]' : '[masked, changed]') : after,
+      ...(masked ? { variants: [expected, before, after] } : {}) };
+  },
+  checkEditor(index, replacement = false) {
+    const ref = refs[index];
+    if (!ref || !editorReady(ref)) return false;
+    const element = ref.editor;
+    // Email/number inputs do not expose selection offsets. Their native selectAll
+    // command is still scoped by the exact active input, never a wrapper.
+    if ('value' in element) return !replacement || element.selectionStart === null ||
+      (element.selectionStart === 0 && element.selectionEnd === element.value.length);
+    const selection = element.getRootNode().getSelection?.() || doc.getSelection();
+    if (!selection || selection.rangeCount !== 1 || !composedContains(element, selection.anchorNode) ||
+        !composedContains(element, selection.focusNode)) return false;
+    if (!replacement) return true;
+    // Range.toString omits block separators while Selection.toString includes
+    // them. Prove no text remains on either side instead (also covers rich CE).
+    const selected = selection.getRangeAt(0);
+    const before = doc.createRange(), after = doc.createRange();
+    before.selectNodeContents(element); after.selectNodeContents(element);
+    before.setEnd(selected.startContainer, selected.startOffset);
+    after.setStart(selected.endContainer, selected.endOffset);
+    return before.toString() === '' && after.toString() === '';
+  },
+  checkDateEditor(index) {
+    const element = refs[index]?.element;
+    return !!element && DATE_INPUT_TYPES.includes(element.type) && ownerReady(element) &&
+      scopeValid(element) && activeElement(element) === element;
   },
   /** After typing a date control's segments: the typed value stands, or the value is set with input and change events. */
   confirmValue(index, expected) {
     const element = refs[index] && refs[index].element;
-    if (!element || !element.isConnected || !('value' in element) || !DATE_INPUT_TYPES.includes(element.type)) return null;
+    if (!element || !ownerReady(element) || !scopeValid(element) || !('value' in element) || !DATE_INPUT_TYPES.includes(element.type)) return null;
     if (element.value === expected) return 'typed';
     setValue(element, expected);
+    if (!scopeValid(element) || !ownerReady(element)) return 'failed';
     element.dispatchEvent(new Event('change', { bubbles: true }));
     return element.value === expected ? 'set' : 'failed';
   },
@@ -1321,6 +1566,7 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     if (document !== doc || location.href !== url) return { status: 'stale', reason: 'navigation' };
     const ref = refs[index];
     if (!ref) return { status: 'stale', reason: 'target_missing' };
+    if (!scopeValid(ref.element)) return { status: 'stale', reason: 'scope_changed' };
     const current = ref.kind === 'page' ? pageState() : ref.kind === 'scroll' ? scrollState(ref.element) : state(ref.element);
     if (!current) return { status: 'stale', reason: 'target_changed' };
     if (!current.enabled || !current.visible || !current.clear) return { status: 'blocked', reason: 'not_interactable' };
@@ -1336,21 +1582,22 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
       // Synthetic DOM activation, not a trusted pointer event. No scrolling/focus side effects first.
       HTMLElement.prototype.click.call(element);
     } else if (operation === 'type' && typeof payload === 'string' && payload.length <= LIMITS.value) {
-      // A native date or time control takes its own value format, whichever way the text was written.
-      if (DATE_INPUT_TYPES.includes(element.type)) {
-        const value = payload === '' ? '' : nativeValue(element.type, payload);
-        if (value === null) return { status: 'blocked', reason: 'unsupported_value: this ' + element.type + ' control takes a ' + element.type + ' such as ' + ({ date: '2026-05-14', time: '14:30', month: '2026-05', week: '2026-W20', 'datetime-local': '2026-05-14T14:30' })[element.type] };
-        if (trusted === true && trustedInput && element.type === 'date' && value) {
-          // Focus lands on the first segment; the host types each segment like a person.
-          HTMLElement.prototype.focus.call(element);
-          return { ...ready('type'), keys: dateKeys(value), expected: value };
+      if (trusted === true && trustedInput) {
+        if (DATE_INPUT_TYPES.includes(element.type)) {
+          const value = payload === '' ? '' : nativeValue(element.type, payload);
+          if (value === null) return { status: 'blocked', reason: 'unsupported_value: this ' + element.type + ' control takes a ' + element.type + ' such as ' + ({ date: '2026-05-14', time: '14:30', month: '2026-05', week: '2026-W20', 'datetime-local': '2026-05-14T14:30' })[element.type] };
+          if (element.type === 'date' && value) {
+            // Focus lands on the first segment; the host types each segment like a person.
+            HTMLElement.prototype.focus.call(element);
+            return { ...ready('type'), keys: dateKeys(value), expected: value };
+          }
+          setValue(element, value);
+          element.dispatchEvent(new Event('change', { bubbles: true }));
+          return { status: 'executed', reason: 'value_set_synthetically: native ' + element.type + ' control', expected: value };
         }
-        setValue(element, value);
-        element.dispatchEvent(new Event('change', { bubbles: true }));
-        return { status: 'executed', reason: 'value_set_synthetically: native ' + element.type + ' control', expected: value };
+        // The host clicks into the field, selects what is there and types over it, like a person.
+        return ready('type');
       }
-      // The host clicks into the field, selects what is there and types over it, like a person.
-      if (trusted === true && trustedInput) return ready('type');
       if (!('value' in element)) return { status: 'blocked', reason: 'unsupported_action' };
       setValue(element, payload);
     } else if (operation === 'select' && Number.isInteger(payload) && payload >= 0 &&
@@ -1370,3 +1617,8 @@ const projection = String.raw`async function(allowedOrigins, maxElements, truste
     return { status: 'executed', reason: 'dispatched_not_verified' };
   } };
 }`;
+/** Host-controlled sensitive grants are fixed into the native projection, never action payloads. */
+const projectionFor = (allowSensitive: boolean, maskSensitive: boolean) => projectionSource.replace(
+  '  const doc = document;',
+  `  const allowSensitive = ${allowSensitive}; const maskSensitive = ${maskSensitive};\n  const doc = document;`,
+);

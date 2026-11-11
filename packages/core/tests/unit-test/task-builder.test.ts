@@ -332,6 +332,56 @@ describe('TaskBuilder', () => {
     expect(locateDump.matchedElement[0].description).toBe('orange');
   });
 
+  it('returns a validated native-dialog suspension without running post-action hooks', async () => {
+    const suspension = {
+      status: 'suspended',
+      reason: 'native-dialog',
+      continuationId: 'dialog-1',
+      dialogType: 'alert',
+      commandPending: true,
+    } as const;
+    const afterInvoke = rs.fn();
+    const action: DeviceAction = {
+      name: 'Tap',
+      description: 'mock tap action',
+      paramSchema: z.object({}),
+      delayBeforeRunner: 0,
+      call: rs.fn(async () => {
+        throw Object.assign(new Error('dialog opened'), {
+          code: 'ACTION_EXECUTION_SUSPENDED',
+          suspension,
+        });
+      }),
+    };
+    const mockInterface = new MockInterface([action]);
+    mockInterface.afterInvokeAction = afterInvoke;
+    const builder = new TaskBuilder({
+      getDefaultModelRuntime: () => mockModelRuntime,
+      interfaceInstance: mockInterface,
+      service: {
+        contextRetrieverFn: rs.fn(),
+        locate: rs.fn(),
+      } as unknown as Service,
+      actionSpace: mockInterface.actionSpace(),
+    });
+    const { tasks } = await builder.build(
+      [{ type: 'Tap', param: {}, thought: 'tap once' }],
+      mockModelRuntime,
+      mockModelRuntime,
+    );
+
+    const result = await tasks[0].executor({
+      task: { timing: {} },
+      uiContext: { shrunkShotToLogicalRatio: 1 },
+    } as any);
+
+    expect(result).toMatchObject({
+      output: suspension,
+      suspendPlanning: { ...suspension, commandPending: true },
+    });
+    expect(afterInvoke).not.toHaveBeenCalled();
+  });
+
   it('throws when building an executable task for an action outside actionSpace', async () => {
     const mockInterface = new MockInterface([defineActionSleep()]);
     const insightService = {

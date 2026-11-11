@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module';
 declare const __VERSION__: string;
 import { ComputerDevice, type DisplayInfo } from './device';
+import { computerNativeRuntime } from './native-runtime';
 
 export function version(): string {
   const currentVersion = __VERSION__;
@@ -35,6 +36,8 @@ function loadMacPermissions(): MacPermissionsLoadResult {
   if (process.platform !== 'darwin') {
     return { permissions: null };
   }
+  const initialized = computerNativeRuntime();
+  if (initialized) return initialized.permissions;
   try {
     const dynamicRequire = createRequire(import.meta.url);
     return {

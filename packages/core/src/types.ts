@@ -631,6 +631,7 @@ export type AgentProgressListener<
 // --- aiAct: the first producer on the generic progress bus ---
 
 export type AiActProgressPhase =
+  | 'suspended'
   | 'start'
   | 'plan_thinking'
   | 'plan_planned'
@@ -663,6 +664,7 @@ export interface AiActProgressAction {
  * stream (e.g. the CLI verbose renderer).
  */
 export interface AiActProgressData {
+  suspension?: ActionExecutionSuspension;
   /** Original user instruction, present on the `start` phase. */
   prompt?: string;
   planIndex?: number;
@@ -754,7 +756,24 @@ export interface ExecutionTaskHitBy {
   context: Record<string, any>;
 }
 
+/** An externally owned pending browser command or observation pause. */
+export interface ActionExecutionSuspension {
+  readonly status: 'suspended';
+  readonly reason: 'native-dialog';
+  readonly commandPending?: boolean;
+  readonly continuationId: string;
+  readonly dialogType: 'alert' | 'confirm' | 'prompt' | 'beforeunload';
+}
+
+export interface ActionExecutionSuspendedError extends Error {
+  readonly code: 'ACTION_EXECUTION_SUSPENDED';
+  readonly suspension: ActionExecutionSuspension;
+}
+
 export interface ExecutionTaskReturn<TaskOutput = unknown, TaskLog = unknown> {
+  suspendPlanning?: ActionExecutionSuspension;
+  /** Observation paused after the task's device action had completed. */
+  observationSuspension?: ActionExecutionSuspension;
   output?: TaskOutput;
   log?: TaskLog;
   recorder?: ExecutionRecorderItem[];
@@ -777,7 +796,13 @@ export type ExecutionTask<
       : unknown
   > & {
     taskId: string;
-    status: 'pending' | 'running' | 'finished' | 'failed' | 'cancelled';
+    status:
+      | 'pending'
+      | 'running'
+      | 'finished'
+      | 'failed'
+      | 'cancelled'
+      | 'suspended';
     /** Readiness strategy selected for this atomic action execution. */
     actionReadiness?: 'default' | 'custom';
     /**

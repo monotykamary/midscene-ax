@@ -8,7 +8,7 @@ Files: browser.ts chrome.ts extension-hub.ts generated.ts interaction.ts page.ts
        session.ts snapshot.ts wire.ts ws-server.ts
 Not vendored: recording.ts (the rrweb DOM tape), tests, gen.ts, repl.ts, the protocol JSON.
 
-No local patches: the guard patches this directory used to carry (transparent native controls, the sensitive-field
+Historical vendor baseline: the guard patches this directory used to carry (transparent native controls, the sensitive-field
 grant, readable-frame limits, role locators on large pages, refusal reasons) are upstream since 20fc83d. Since
 3c436dc upstream also carries the flow-runner pilot's last patches: trusted fill types like a person (click,
 select-all, a key per keyable character, other scripts committed whole, long text pasted), native date and time

@@ -3,6 +3,29 @@ import { Agent } from '../../src/agent/agent';
 import { commonAgentTestRunnerNodeDefinitions } from '../../src/agent/test-runner-nodes';
 
 describe('Agent Test Runner Node definitions', () => {
+  it('does not report a suspended native action as a successful declarative node', async () => {
+    const definition = commonAgentTestRunnerNodeDefinitions.find(
+      (node) => node.name === 'aiAct',
+    )!;
+    const suspension = {
+      status: 'suspended',
+      reason: 'native-dialog',
+      commandPending: true,
+      continuationId: 'dialog-1',
+      dialogType: 'confirm',
+    };
+    await expect(
+      definition.execute(
+        { aiAct: async () => suspension },
+        definition.inputSchema.parse({ prompt: 'Open dialog' }),
+        { signal: new AbortController().signal },
+      ),
+    ).rejects.toMatchObject({
+      code: 'NODE_EXECUTION_ERROR',
+      cause: { code: 'ACTION_EXECUTION_SUSPENDED' },
+      output: { data: suspension },
+    });
+  });
   it.each([
     { timeoutMs: 100, checkIntervalMs: 200 },
     { timeoutMs: 100 },

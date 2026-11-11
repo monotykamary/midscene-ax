@@ -1,9 +1,9 @@
 import { randomBytes, randomUUID } from 'node:crypto';
-import type { Session } from './session.ts';
-import { InteractionController, type InteractionAction, type InteractionObservation, type InteractionReceipt, type InteractionInput } from './interaction.ts';
-import { renderAX, snapshotDiff, snapshotLimits, nodeIdentity, roleOf, nameOf, SnapshotLimitError, MAX_SNAPSHOT_CHARS, MISSING_SUBTREE,
-  type AXNode, type SnapshotOptions, type SnapshotFrame, type SnapshotRef, type PageSnapshot } from './snapshot.ts';
-export type { PageSnapshot, SnapshotOptions } from './snapshot.ts';
+import type { Session } from './session.js';
+import { InteractionController, type InteractionAction, type InteractionObservation, type InteractionReceipt, type InteractionInput, type InteractionCommit, type ScopeBinding } from './interaction.js';
+import { renderAX, snapshotDiff, snapshotLimits, nodeIdentity, snapshotAncestry, roleOf, nameOf, SnapshotLimitError, MAX_SNAPSHOT_CHARS, MISSING_SUBTREE,
+  type AXNode, type SnapshotOptions, type SnapshotFrame, type SnapshotRef, type PageSnapshot } from './snapshot.js';
+export type { PageSnapshot, SnapshotOptions } from './snapshot.js';
 
 export type PageOptions = {
   sessionId: string; targetId?: string; allowedOrigins: string[]; input?: InteractionInput; timeoutMs?: number; ownsAttachment?: boolean;
@@ -13,10 +13,11 @@ export type PageOptions = {
   maskSensitive?: boolean;
 };
 export type CallOptions = { signal?: AbortSignal; timeoutMs?: number };
-export type ActionOptions = CallOptions & { verify?: (snapshot: PageSnapshot) => boolean };
+export type ActionOptions = CallOptions & { verify?: (snapshot: PageSnapshot) => boolean; scopeBinding?: ScopeBinding; commit?: { kind: 'blur'; sensitive?: boolean } };
 export type ActionResult = InteractionReceipt & {
   /** null means no goal predicate/read-back was established. Dispatch is not success. */
   verified: boolean | null;
+  committed?: InteractionCommit;
   snapshot?: PageSnapshot;
   observation?: InteractionObservation;
   verificationError?: string;
@@ -27,12 +28,8 @@ type Query = { kind: 'ref'; ref: string; epoch: number } | { kind: 'css'; select
 type Frame = SnapshotFrame & { parentId?: string };
 const invalidations = new Set(['Page.frameNavigated', 'Page.navigatedWithinDocument', 'Page.frameDetached',
   'Runtime.executionContextsCleared', 'DOM.documentUpdated', 'Inspector.detached', 'Inspector.targetCrashed']);
-const MAX_FRAMES = 64;
-const UNREADABLE_FRAME = /^frame \S+: (?:origin_denied|not committed)$/;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
-/** The blocked reason when the guard offers no candidate: a stable code, then why and the next move. */
-const refusal = (seen: InteractionObservation) => 'not_interactable_or_unsupported' +
-  (seen.truncated ? ': observation truncated' : seen.refusal ? `: ${seen.refusal}` : '');
+const UNREADABLE_FRAME = /^frame \S+: (?:origin_denied|not committed)$/;
 const frameKey = (frame: any) => JSON.stringify([frame.id, frame.loaderId, frame.url]);
 
 /** Scope-bound page. No method reads or changes Session's mutable active-target pointer. */
@@ -158,11 +155,10 @@ export class Page {
       const f = entry.frame;
       if (visited.has(f.id)) return;
       visited.add(f.id);
-      // Denied frames (cross-origin ads, trackers) are only listed as omissions and never read,
-      // so only readable frames count toward the limit.
+      // flow-pilot patch: cross-origin frames (ads, trackers) are omitted, so only readable frames count toward the limit.
       if (!this.allowed(f)) { omissions.push(`frame ${f.id}: origin_denied`); return; }
+      if (frames.length >= 64) throw new SnapshotLimitError('Frame count exceeds 64');
       if (!f.loaderId) { omissions.push(`frame ${f.id}: not committed`); return; }
-      if (frames.length >= MAX_FRAMES) throw new SnapshotLimitError(`Frame count exceeds ${MAX_FRAMES}`);
       frames.push({ frameId: f.id, sessionId: this.childSessions.get(f.id) ?? sid, key: frameKey(f), url: f.url, parentId: f.parentId });
       for (const child of entry.childFrames ?? []) visit(child, sid);
     };
@@ -287,11 +283,13 @@ export class Page {
         if (!frame.parentId || frameId) throw error;
         omissions.push(`frame ${frame.frameId}: unavailable`); continue;
       }
+      const ancestry = snapshotAncestry(nodes);
       if (selected && selected.frame.key !== frame.key) throw new Error('stale_ref: document changed');
       const rootBackendId = selected?.backendNodeId ?? (options.selector ? await this.selectorNode(options.selector, frame, signal) : undefined);
       if (selected) {
         const target = nodes.find(n => n.backendDOMNodeId === selected.backendNodeId && !n.ignored);
         if (!target || nodeIdentity(target) !== selected.identity) throw new Error('stale_ref: target changed');
+        if (ancestry(target).ancestorIdentity !== selected.ancestorIdentity) throw new Error('stale_ref: ancestor scope changed');
       }
       const root = nodes.find(n => roleOf(n) === 'RootWebArea');
       if (frame === main) title = nameOf(root ?? { nodeId: '', ignored: false });
@@ -300,7 +298,8 @@ export class Page {
         // Snapshot generations are part of the printed ID, so old strings cannot
         // accidentally resolve to a different element on a later snapshot.
         const ref = `${prefix}s${this.refNamespace}_${sequence}e${++number}`;
-        refs.set(ref, { frame: { ...frame }, backendNodeId: node.backendDOMNodeId!, identity: nodeIdentity(node), role: roleOf(node), name: nameOf(node), context });
+        const lineage = ancestry(node);
+        refs.set(ref, { frame: { ...frame }, backendNodeId: node.backendDOMNodeId!, identity: nodeIdentity(node), ...lineage, role: roleOf(node), name: nameOf(node), context });
         keys.set(ref, `${frame.key}:${node.backendDOMNodeId}`);
         return ref;
       }, rootBackendId);
@@ -364,7 +363,7 @@ export class Page {
         throw new Error(why ? `No accessible target for selector: ${why}` : 'No accessible target for selector');
       }
       if (unread) throw unread;
-      return { frame, backendNodeId, identity: nodeIdentity(node), role: roleOf(node), name: nameOf(node) };
+      return { frame, backendNodeId, identity: nodeIdentity(node), ...snapshotAncestry(nodes)(node), role: roleOf(node), name: nameOf(node) };
     }
     // Role matching needs the complete scope, not a readable digest: read up to the
     // documented maximum so large pages resolve instead of failing at the 50,000 default.
@@ -384,38 +383,98 @@ export class Page {
     const { frames } = await this.framesInternal(signal);
     const current = frames.find(f => f.frameId === ref.frame.frameId);
     if (!current || current.key !== ref.frame.key) throw new Error('stale_ref: document changed');
-    const result = await this.call('Accessibility.getPartialAXTree', { backendNodeId: ref.backendNodeId, fetchRelatives: false }, signal, ref.frame.sessionId);
-    const node = (result.nodes as AXNode[]).find(n => n.backendDOMNodeId === ref.backendNodeId && !n.ignored);
+    const nodes = await this.frameNodes(current, signal);
+    const node = nodes.find(n => n.backendDOMNodeId === ref.backendNodeId && !n.ignored);
     if (!node || nodeIdentity(node) !== ref.identity) throw new Error('stale_ref: target changed');
+    if (snapshotAncestry(nodes)(node).ancestorIdentity !== ref.ancestorIdentity) throw new Error('stale_ref: ancestor scope changed');
+  }
+
+  /**
+   * flow-pilot patch: why the guard offered no candidate for a resolved target, so any model gets the reason and the
+   * next move instead of a bare refusal. Diagnosis only: it never changes what may be acted on.
+   */
+  private async whyNotInteractable(ref: SnapshotRef, signal: AbortSignal): Promise<string> {
+    try {
+      const { object } = await this.call('DOM.resolveNode', { backendNodeId: ref.backendNodeId }, signal, ref.frame.sessionId);
+      const { result } = await this.call('Runtime.callFunctionOn', { objectId: object.objectId, returnByValue: true, functionDeclaration: `function () {
+        const el = this, name = e => e.tagName.toLowerCase() + (e.id ? '#' + e.id : '') + (e.textContent ? ' ' + JSON.stringify(e.textContent.trim().slice(0, 40)) : '');
+        if (el.matches(':disabled') || el.closest('[aria-disabled="true"]')) return ': disabled. Verify that with a check, or do what enables it first';
+        let treeHidden = null;
+        for (let e = el; e; e = e.parentElement || (e.getRootNode() && e.getRootNode().host)) {
+          const cs = getComputedStyle(e);
+          if (cs.display === 'none' || cs.visibility !== 'visible' || Number(cs.opacity) === 0 || e.hidden || e.inert)
+            return ': hidden (' + (e === el ? 'itself' : 'by ancestor ' + name(e)) + '). Open or reveal what contains it first';
+          if (!treeHidden && e.getAttribute('aria-hidden') === 'true') treeHidden = e;
+        }
+        const r = el.getBoundingClientRect();
+        if (treeHidden && r.width && r.height) return ': pointer-only: visible, but hidden from the accessibility tree (aria-hidden on ' + (treeHidden === el ? 'itself' : name(treeHidden)) + '). Click it where a user would: tools.clickAt({x:' + Math.round(r.x + r.width / 2) + ',y:' + Math.round(r.y + r.height / 2) + '})';
+        if (!r.width || !r.height) return ': it has no size on the page';
+        if (r.right <= 0 || r.bottom <= 0 || r.left >= innerWidth || r.top >= innerHeight) return ': outside the viewport. Scroll it into view (tools.scrollTo), then retry';
+        const hit = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2);
+        if (hit && hit !== el && !el.contains(hit) && !hit.contains(el)) return ': covered at its centre by ' + name(hit) + '. Close or move what covers it, then retry';
+        return ': not an operable control (' + el.tagName.toLowerCase() + '). Act on the control itself (role/label/ref), or use tools.clickText for clickable text';
+      }` }, signal, ref.frame.sessionId);
+      return typeof result?.value === 'string' ? result.value : '';
+    } catch { return ''; }
+  }
+
+  /** Mark the exact retained owner, never a re-queried selector or global focused field. */
+  private async markCommitSecret(ref: SnapshotRef, signal: AbortSignal): Promise<void> {
+    const { object } = await this.call('DOM.resolveNode', { backendNodeId: ref.backendNodeId }, signal, ref.frame.sessionId);
+    if (!object?.objectId) throw new Error('Secret owner registration unavailable');
+    try {
+      const marked = await this.call('Runtime.callFunctionOn', { objectId: object.objectId, functionDeclaration: `function() {
+        if (!this.isConnected) return false;
+        // A CSS-target fill need not have evaluated Surface's read helpers yet.
+        if (!window.__codemodeSecretFields) Object.defineProperty(window, '__codemodeSecretFields', { value: new Set(), enumerable: false });
+        const fields = window.__codemodeSecretFields;
+        if (!fields || typeof fields.add !== 'function') return;
+        fields.add(this);
+        const walker = document.createTreeWalker(this, NodeFilter.SHOW_ELEMENT);
+        for (let node, n = 0; n < 256 && (node = walker.nextNode()); n++) {
+          if (node.isContentEditable || 'value' in node) fields.add(node);
+        }
+        return fields.has(this);
+      }`, returnByValue: true }, signal, ref.frame.sessionId);
+      if (marked.exceptionDetails || marked.result?.value !== true) throw new Error('Secret owner registration unavailable');
+    } finally { await this.call('Runtime.releaseObject', { objectId: object.objectId }, signal, ref.frame.sessionId).catch(() => {}); }
   }
 
   /** Internal Locator entry point; selection never dispatches raw input. */
   async perform(query: Query, operation: string, payload: string | number | undefined, options: ActionOptions = {}): Promise<ActionResult> {
-    options = { ...options };
+    options = { ...options, ...(options.scopeBinding ? { scopeBinding: Object.freeze({ ...options.scopeBinding }) } : {}) };
+    options.commit = options.commit ? { ...options.commit } : undefined;
     let attempted = false;
     return this.run<ActionResult>(async signal => {
+      if (options.commit && (operation !== 'type' || options.commit.kind !== 'blur')) return { status: 'blocked', reason: 'invalid_commit', verified: null };
       if ((operation === 'type' && (typeof payload !== 'string' || payload.length > 4096)) ||
           (operation === 'press' && typeof payload !== 'string') ||
           (operation === 'select' && typeof payload !== 'string' && (!Number.isInteger(payload) || Number(payload) < 0 || Number(payload) >= 64))) {
         return { status: 'blocked', reason: 'invalid_action_payload', verified: null };
       }
+      // Pin a layout root before resolving the target; later observations never re-query its selector.
+      let scopeRootBackendNodeId: number | undefined;
+      if (options.scopeBinding?.kind === 'layout') {
+        const { frames } = await this.framesInternal(signal);
+        scopeRootBackendNodeId = await this.selectorNode(options.scopeBinding.rootSelector, frames[0]!, signal);
+      }
       const ref = await this.resolve(query, signal);
       await this.currentTarget(ref, signal);
+      const scopeBinding = options.scopeBinding ?? ref.scopeBinding;
       const { frames } = await this.framesInternal(signal);
       if (ref.frame.frameId !== frames[0]!.frameId) return { status: 'blocked', reason: 'frame_actions_unsupported', verified: null };
-      const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId }, { signal });
+      const observe = () => this.guard.observe({ scope: this.scope, backendNodeId: ref.backendNodeId, scopeBinding, scopeRootBackendNodeId }, { signal });
       let seen = await observe();
       let candidate = seen.candidates[0];
-      if (!candidate || seen.truncated) return { status: 'blocked', reason: refusal(seen), verified: null };
+      if (!candidate || seen.truncated) return { status: 'blocked', reason: 'not_interactable_or_unsupported' + (seen.truncated ? ': observation truncated' : await this.whyNotInteractable(ref, signal)), verified: null };
       if (operation !== 'scroll_into_view' && candidate.operations.length === 1 && candidate.operations[0] === 'scroll_into_view') {
         attempted = true;
         const scroll = await this.guard.act({ scope: this.scope, observationId: seen.observationId, action: { targetId: candidate.id, operation: 'scroll_into_view' } }, { signal });
         if (scroll.status !== 'executed') return { ...scroll, verified: null };
         await this.currentTarget(ref, signal);
         seen = await observe(); candidate = seen.candidates[0];
-        if (!candidate) return { status: 'blocked', reason: refusal(seen), verified: null };
       }
-      if (!candidate.operations.includes(operation)) return { status: 'blocked', reason: 'unsupported_action', verified: null };
+      if (!candidate || !candidate.operations.includes(operation)) return { status: 'blocked', reason: 'unsupported_action', verified: null };
       const action: InteractionAction = { targetId: candidate.id, operation };
       let expected: string | undefined;
       if (operation === 'type') { action.text = String(payload); expected = action.text; }
@@ -429,23 +488,42 @@ export class Page {
         }
         expected = candidate.options?.[action.option!];
       }
+      if (operation === 'type' && options.commit?.sensitive) await this.markCommitSecret(ref, signal);
       attempted = true;
       const receipt = await this.guard.act({ scope: this.scope, observationId: seen.observationId, action }, { signal });
       this.refs.clear(); this.epoch++;
       if (receipt.status !== 'executed') return { ...receipt, verified: null };
-      const result: ActionResult = { ...receipt, verified: null };
+      const result: ActionResult = { ...receipt, verified: receipt.verified ?? null };
       try {
+        if (operation === 'type' && options.commit?.kind === 'blur') {
+          if (options.commit.sensitive) await this.markCommitSecret(ref, signal);
+          result.committed = await this.guard.commitTypedValue({ scope: this.scope, observationId: seen.observationId, targetId: candidate.id, sensitive: options.commit.sensitive }, { signal });
+          result.verified = result.committed.verified;
+          if (options.commit.sensitive || result.committed.masked) {
+            await this.markCommitSecret(ref, signal).catch(() => {});
+            // Do not return an unmasked AX snapshot of a caller-declared secret.
+            return result;
+          }
+        }
         if (expected !== undefined) {
           result.observation = await observe();
           // A native date or time control holds its own value format, which the guard reports as the expected value.
           const want = (receipt as { expected?: string }).expected ?? expected;
           // A masked (sensitive) field cannot be read back: its entry is not verified either way.
           const shown = result.observation.candidates[0]?.value;
-          result.verified = shown === '[masked]' ? null : result.observation.candidates.length === 1 && shown === want;
+          // Trusted typing already read the unique live editor inside the original
+          // owner. The original backend node may just be its display/wrapper.
+          // This is immediate readback only; callers must verify persisted state after commit.
+          if (!options.commit && !Object.hasOwn(receipt, 'verified')) {
+            result.verified = shown === '[masked]' ? null : result.observation.candidates.length === 1 && shown === want;
+          }
         }
         result.snapshot = await this.snapshotInternal({}, signal);
         if (options.verify) result.verified = options.verify(result.snapshot) === true;
-      } catch (error) { result.verificationError = message(error); }
+      } catch (error) {
+        if (operation === 'type') result.verified = null;
+        result.verificationError = message(error);
+      }
       return result;
     }, options).catch(error => ({ status: attempted ? 'outcome_unknown' : message(error).startsWith('stale_ref') ? 'stale' : 'blocked', reason: message(error), verified: null }));
   }
@@ -531,11 +609,14 @@ export class Page {
 export class Locator {
   private readonly page: Page;
   private readonly query: Query;
-  constructor(page: Page, query: Query) { this.page = page; this.query = structuredClone(query); }
-  click(options?: ActionOptions) { return this.page.perform(this.query, 'click', undefined, options); }
-  fill(text: string, options?: ActionOptions) { return this.page.perform(this.query, 'type', text, options); }
-  press(key: string, options?: ActionOptions) { return this.page.perform(this.query, 'press', key, options); }
+  private readonly scopeBinding?: ScopeBinding;
+  constructor(page: Page, query: Query, scopeBinding?: ScopeBinding) { this.page = page; this.query = structuredClone(query); this.scopeBinding = scopeBinding ? Object.freeze({ ...scopeBinding }) : undefined; }
+  withScopeBinding(binding: ScopeBinding): Locator { return new Locator(this.page, this.query, binding); }
+  private options(options?: ActionOptions): ActionOptions { return { ...options, ...(this.scopeBinding ? { scopeBinding: this.scopeBinding } : {}) }; }
+  click(options?: ActionOptions) { return this.page.perform(this.query, 'click', undefined, this.options(options)); }
+  fill(text: string, options?: ActionOptions) { return this.page.perform(this.query, 'type', text, this.options(options)); }
+  press(key: string, options?: ActionOptions) { return this.page.perform(this.query, 'press', key, this.options(options)); }
   /** A unique option label or zero-based index, not an HTML value or selector DSL. */
-  selectOption(option: string | number, options?: ActionOptions) { return this.page.perform(this.query, 'select', option, options); }
-  scrollIntoView(options?: ActionOptions) { return this.page.perform(this.query, 'scroll_into_view', undefined, options); }
+  selectOption(option: string | number, options?: ActionOptions) { return this.page.perform(this.query, 'select', option, this.options(options)); }
+  scrollIntoView(options?: ActionOptions) { return this.page.perform(this.query, 'scroll_into_view', undefined, this.options(options)); }
 }
