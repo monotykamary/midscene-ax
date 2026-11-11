@@ -118,4 +118,34 @@ describe('service-caller empty content handling', () => {
       time_cost: expect.any(Number),
     });
   });
+
+  it('reads the last choice with text when a gateway splits the reply', async () => {
+    const { callGenerativeAI } = await import('@/ai-model/service-caller');
+    const { getModelRuntime } = await import('@/ai-model/models');
+    mockCreate.mockResolvedValueOnce({
+      choices: [
+        { index: 0, message: { role: 'assistant', content: '' } },
+        { index: 1, message: { role: 'assistant', content: 'preamble' } },
+        { index: 2, message: { role: 'assistant', content: 'answer' } },
+        { index: 3, message: { role: 'assistant', content: '   ' } },
+      ],
+    });
+    const result = await callGenerativeAI(
+      [{ role: 'user', content: 'hello' }],
+      getModelRuntime({
+        modelName: 'gpt-4o',
+        modelDescription: 'test model',
+        openaiApiKey: 'test-key',
+        intent: 'default',
+        slot: 'default',
+        retryCount: 0,
+      }),
+    );
+    expect(mockCreate).toHaveBeenCalledTimes(1);
+    expect(result.content).toBe('answer');
+    expect(result.rawAssistantOutput).toEqual({
+      type: 'chat-completion',
+      rawValue: { role: 'assistant', content: 'answer' },
+    });
+  });
 });

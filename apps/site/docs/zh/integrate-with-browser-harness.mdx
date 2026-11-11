@@ -1,0 +1,83 @@
+import SetupEnv from './common/setup-env.mdx';
+
+# 集成到 browser-harness-js
+
+`@midscene/web/browser-harness` 通过 [browser-harness-js](https://github.com/monotykamary/browser-harness-js) 以原始 CDP 驱动 Chrome。它实现了 Midscene 的 [无障碍树契约](./integrate-with-any-interface#无障碍树契约可选)：操作先在浏览器的无障碍树中寻址，模型作为兜底。
+
+## 先用无障碍树，视觉兜底
+
+调用 `agent.aiTap('Log in')` 时，Midscene 会向页面查询无障碍快照中所有可访问名称恰好为 `Log in` 的元素：
+
+- **恰好一个用户能看到的匹配**：通过 ref 绑定该元素，点击经由 browser-harness-js 的受保护 locator 执行。locator 会重新确认 ref 仍指向同一个元素、元素可用且未被遮挡，只执行一次，并返回回执（`executed`、`stale`、`blocked` 或 `outcome_unknown`）。不调用模型。
+- **没有匹配、有多个匹配，或匹配的元素用户看不到**：无障碍树放弃判断，Midscene 照常根据截图定位元素，再按坐标操作。
+
+“能看到”由页面内的确定性检查判断：元素及其祖先的 display、visibility 和 opacity，overflow 裁剪，是否位于页面之外，仅供读屏器的裁剪，零字号，透明文字，以及对遮挡物的命中测试。这些检查会进入开放的 shadow root。位于首屏以下的元素视为可感知，harness 会在操作前把它滚动到视口内。
+
+无障碍树路径上的几种结果：
+
+- **控件被禁用**：操作为 `blocked`，该步骤失败并给出 harness 的原因（例如 `disabled. Verify that with a check, or do what enables it first`）。Midscene 不会改用坐标点击。
+- **定位与操作之间页面重新渲染了该元素**：device 会在新的快照中重新绑定到角色、名称和所在容器都相同的唯一元素（`receipt.rebound`）。若不唯一，回执为 `stale`，Midscene 按定位到的坐标操作一次。
+- **harness 没有受保护形式的操作**（悬停、双击、右键，以及除 `Enter`、`Escape` 等单键外的组合键），以及其 guard 不操作的元素（滑块、自定义选择器组件；原生日期和时间输入框由 guard 直接输入）：元素仍从无障碍树定位，操作按其坐标执行。
+- **iframe 中的元素**会计入匹配数量，但不会从无障碍树绑定：harness 只在顶层文档中操作，因此这些元素交给视觉定位。
+
+无障碍树按页面状态读取一次：在页面导航、执行操作或文档发生变更之前，快照会被复用。
+
+## 配置模型 API Key
+
+<SetupEnv />
+
+模型用于规划（`aiAct`）、查询和断言，以及定位无障碍树无法确定的元素。
+
+## 连接 Chrome
+
+以远程调试方式启动 Chrome（例如 `--remote-debugging-port=9222`），然后连接，并打开新标签页或附加到已有标签页：
+
+```typescript title="./demo.ts"
+import 'dotenv/config';
+import { BrowserHarnessAgent } from '@midscene/web/browser-harness';
+
+const agent = await BrowserHarnessAgent.connect({
+  connect: { port: 9222 }, // 或 { wsUrl } / { profileDir }
+  url: 'https://example.com/login', // 或 targetId: '<已有标签页 id>'
+});
+
+await agent.aiTap('Log in'); // 只有一个名为 "Log in" 的按钮：从无障碍树绑定
+await agent.aiInput('Email', { value: 'qa@example.com' });
+await agent.aiAct('打开账号菜单并退出登录'); // 由模型规划
+await agent.destroy(); // 关闭它打开的标签页并断开连接
+```
+
+如果要自行创建 Agent，可以单独使用 device `BrowserHarnessPage`：
+
+```typescript
+import {
+  BrowserHarnessAgent,
+  BrowserHarnessPage,
+} from '@midscene/web/browser-harness';
+
+const page = await BrowserHarnessPage.connect({
+  connect: { wsUrl: 'ws://127.0.0.1:9222/devtools/browser/<id>' },
+  targetId: '<标签页 id>',
+  allowedOrigins: ['https://example.com', 'https://login.example.com'],
+});
+const agent = new BrowserHarnessAgent(page);
+```
+
+### 选项
+
+- `allowedOrigins`：harness 可以读取和操作的精确 origin。默认为 `url` 或所附加标签页的 origin。在其他 origin 上无障碍树会放弃判断（视觉仍可用），`Navigate` 会拒绝执行。
+- `allowSensitiveFields`：允许受保护操作作用于密码、邮箱、姓名等个人信息字段，browser-harness-js 默认拒绝这些字段。默认 `true`，因为测试执行器以测试者的权限操作。
+- `timeoutMs`：harness 每次读取和操作的超时时间（默认 30000）。
+- `keyboardTypeDelay`、`inputStrategy`：与其他 Web device 相同。
+
+## 显式指定元素
+
+纯字符串的 prompt 会作为精确的可访问名称尝试匹配。传入 `tree` 可以同时指定角色或所在容器；prompt 仍作为视觉定位的兜底：
+
+```typescript
+await agent.aiTap('对话框里的保存按钮', {
+  tree: { role: 'button', name: 'Save', exact: true, context: 'dialog: Edit profile' },
+});
+```
+
+每个定位任务会在 `task.treeLocate` 中记录无障碍树的结果（命中，或放弃及原因），每个基于 ref 的操作会在 `task.receipt` 中记录回执，因此报告中可以看出哪些步骤用到了模型。

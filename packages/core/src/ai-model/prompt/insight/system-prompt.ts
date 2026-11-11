@@ -4,9 +4,11 @@ import type { InsightProtocol } from '../../model-adapter/insight-protocol';
 function buildInsightContextPrompt({
   screenshotIncluded,
   referenceImagesIncluded,
+  currentEvidenceImagesIncluded,
 }: {
   screenshotIncluded: boolean;
   referenceImagesIncluded: boolean;
+  currentEvidenceImagesIncluded: boolean;
 }) {
   const contextPrompts = [
     "The user will give you data requirements in <DATA_DEMAND>. You need to understand the user's requirements and extract the data satisfying the <DATA_DEMAND>.",
@@ -14,11 +16,15 @@ function buildInsightContextPrompt({
 
   if (screenshotIncluded) {
     contextPrompts.push(
-      'The user will provide a current screenshot to evaluate, and may provide its contents. Base your answer on the current screenshot and its contents when provided. Treat them as the primary source of truth for what is currently visible or true.',
+      currentEvidenceImagesIncluded
+        ? 'The user will provide a current screenshot and additional evidence images captured sequentially at other positions or times. Each image establishes only what was visible at its capture time. They are not a simultaneous snapshot; do not combine them to infer coexistence, exact aggregate counts, or absence unless independent evidence establishes state consistency. Geometric capture coverage does not prove visibility through sticky elements or overlays; leave unobserved or occluded requirements unverified.'
+        : 'The user will provide a current screenshot to evaluate, and may provide its contents. Base your answer on the current screenshot and its contents when provided. Treat them as the primary source of truth for what is currently visible or true.',
     );
   } else {
     contextPrompts.push(
-      'The user will not provide a current screenshot. Use only the supplied page contents and other inputs, and do not infer unsupported visual details.',
+      currentEvidenceImagesIncluded
+        ? 'The user will provide current-state evidence images from the current observation. Treat all of them as direct evidence; they may show different page regions, so evaluate them collectively.'
+        : 'The user will not provide a current screenshot. Use only the supplied page contents and other inputs, and do not infer unsupported visual details.',
     );
   }
 
@@ -38,16 +44,21 @@ function buildInsightContextPrompt({
 export function buildInsightSystemPrompt(options: {
   screenshotIncluded?: boolean;
   referenceImagesIncluded?: boolean;
+  /** Some images are evidence of the current state (role 'current'), not references. */
+  currentEvidenceImagesIncluded?: boolean;
   insightProtocol: InsightProtocol;
 }) {
   const preferredLanguage = getPreferredLanguage();
   const screenshotIncluded = options.screenshotIncluded ?? true;
   const referenceImagesIncluded = options.referenceImagesIncluded ?? false;
+  const currentEvidenceImagesIncluded =
+    options.currentEvidenceImagesIncluded ?? false;
   const { responsePrefix, dataOutput } = options.insightProtocol;
 
   const contextPrompt = buildInsightContextPrompt({
     screenshotIncluded,
     referenceImagesIncluded,
+    currentEvidenceImagesIncluded,
   });
 
   return `

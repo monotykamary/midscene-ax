@@ -2,7 +2,10 @@ import type { RawAssistantOutput } from '@/types';
 import type { OpenAIProtocolCallResult } from '../../types';
 import { AIResponseParseError, hasUsableText } from '../../utils';
 import type { ChatCompletionCallOptions } from './types';
-import { resolveContentWithReasoningFallback } from './utils';
+import {
+  findLastWithUsableText,
+  resolveContentWithReasoningFallback,
+} from './utils';
 
 export const callChatCompletionNonStreaming = async ({
   completion,
@@ -32,11 +35,16 @@ export const callChatCompletionNonStreaming = async ({
     );
   }
 
+  const choice =
+    findLastWithUsableText(
+      result.choices,
+      (item) => extractContentAndReasoning(item.message).content,
+    ) ?? result.choices[0];
   const rawAssistantOutput: RawAssistantOutput = {
     type: 'chat-completion',
-    rawValue: result.choices[0].message,
+    rawValue: choice.message,
   };
-  const parsedMessage = extractContentAndReasoning(result.choices[0].message);
+  const parsedMessage = extractContentAndReasoning(choice.message);
   const reasoningContent = parsedMessage.reasoning_content;
   const content = resolveContentWithReasoningFallback({
     content: parsedMessage.content,

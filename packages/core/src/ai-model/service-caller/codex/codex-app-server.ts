@@ -14,6 +14,64 @@ const CODEX_INTERRUPT_TIMEOUT_MS = 5_000;
 const CODEX_DEFAULT_PROCESS_START_TIMEOUT_MS = 15 * 1000;
 const CODEX_DEFAULT_CLEANUP_TIMEOUT_MS = 8 * 1000;
 const CODEX_TEXT_INPUT_MAX_LENGTH = 256 * 1024;
+// A model call asks for one reply. Codex may post it as commentary, as the
+// final answer, or both (an empty final answer after a full commentary is
+// common). A turn that keeps posting commentary without a final answer is a
+// runaway (seen: 23 messages and 780K tokens in one planning call): it is
+// interrupted here and answers with its latest message instead of running
+// into the hard timeout.
+const CODEX_MAX_COMMENTARY_MESSAGES = 3;
+
+/**
+ * Thread config for an engine model call. The isolated CODEX_HOME drops the
+ * operator's MCP servers and plugins, but Codex still ships its own agent
+ * tools (shell, sleep, computer and browser use, sub-agents) and lists the
+ * user-level skills under ~/.agents/skills. A planning call that can reach
+ * them stops being one call: it sleeps, reads skill files and loops. The
+ * engine's own action space is in the prompt; the thread gets no tools.
+ */
+export const CODEX_MODEL_CALL_THREAD_CONFIG: Record<string, unknown> = {
+  'features.shell_tool': false,
+  'features.unified_exec': false,
+  'features.sleep_tool': false,
+  'features.computer_use': false,
+  'features.browser_use': false,
+  'features.browser_use_external': false,
+  'features.in_app_browser': false,
+  'features.multi_agent': false,
+  'features.multi_agent_v2': false,
+  'features.code_mode': false,
+  'features.code_mode_host': false,
+  'features.request_permissions_tool': false,
+  'features.default_mode_request_user_input': false,
+  'tools.experimental_request_user_input.enabled': false,
+  'tools.update_plan.enabled': false,
+  'features.apps': false,
+  'features.plugins': false,
+  'features.image_generation': false,
+  'features.view_image': false,
+  'features.tool_suggest': false,
+  'features.skill_search': false,
+  'features.goals': false,
+  'features.hooks': false,
+  'features.memories': false,
+  'features.standalone_web_search': false,
+  'skills.include_instructions': false,
+  web_search: 'disabled',
+};
+
+/**
+ * Leads the developer instructions of every model call. With its tools off,
+ * a Codex thread still carries the coding-agent persona, and the model
+ * sometimes answers a planning prompt with "no UI interaction tool is
+ * available" instead of naming the next action. It does not act itself: the
+ * caller reads the reply and performs what it names.
+ */
+export const CODEX_MODEL_CALL_PREAMBLE =
+  'You are the model behind an automation engine, not an agent with tools. ' +
+  'Reply with text only, in exactly the format the instructions below ask for. ' +
+  'The engine reads your reply and performs every action it names on the device, ' +
+  'so never answer that a tool or UI action is unavailable: name the action instead.';
 
 const debugCodex = getDebug('ai:call:codex');
 const warnCodex = getDebug('ai:call:codex', { console: true });
@@ -407,6 +465,11 @@ class CodexAppServerConnection {
     let latestErrorMessage: string | undefined;
     let accumulatedText = '';
     let accumulatedReasoning = '';
+    // The reply is the final-answer message, else the latest non-empty
+    // message; deltas span every message in the turn and repeat the answer.
+    let finalAnswerText: string | undefined;
+    let lastMessageText: string | undefined;
+    let commentaryMessages = 0;
     let latestUsage: OpenAI.CompletionUsage | undefined;
 
     const emitChunk = ({
@@ -440,7 +503,10 @@ class CodexAppServerConnection {
         ephemeral: true,
         experimentalRawEvents: false,
         persistExtendedHistory: false,
-        developerInstructions: developerInstructions || null,
+        developerInstructions: developerInstructions
+          ? `${CODEX_MODEL_CALL_PREAMBLE}\n\n${developerInstructions}`
+          : CODEX_MODEL_CALL_PREAMBLE,
+        config: CODEX_MODEL_CALL_THREAD_CONFIG,
       };
       onRecordEvent?.({
         type: 'request',
@@ -582,10 +648,35 @@ class CodexAppServerConnection {
           params.threadId === threadId &&
           params.turnId === turnId &&
           params.item?.type === 'agentMessage' &&
-          typeof params.item?.text === 'string' &&
-          !accumulatedText
+          typeof params.item?.text === 'string'
         ) {
-          accumulatedText = params.item.text;
+          const text: string = params.item.text;
+          if (text.trim()) lastMessageText = text;
+          // A server without message phases sends one message: the answer.
+          if (params.item.phase !== 'commentary') {
+            if (finalAnswerText === undefined && text.trim()) {
+              finalAnswerText = text;
+            }
+            continue;
+          }
+          commentaryMessages += 1;
+          if (
+            finalAnswerText === undefined &&
+            commentaryMessages >= CODEX_MAX_COMMENTARY_MESSAGES
+          ) {
+            await this.request({
+              method: 'turn/interrupt',
+              params: { threadId, turnId },
+              deadlineAt: Date.now() + CODEX_INTERRUPT_TIMEOUT_MS,
+            }).catch(() => {});
+            if (!lastMessageText) {
+              throw new Error(
+                `codex turn kept going without an answer after ${commentaryMessages} messages; stopped it instead of waiting for the timeout`,
+              );
+            }
+            turnStatus = 'completed';
+            break;
+          }
           continue;
         }
 
@@ -627,7 +718,7 @@ class CodexAppServerConnection {
       }
 
       return {
-        content: accumulatedText,
+        content: finalAnswerText ?? lastMessageText ?? accumulatedText,
         reasoning_content: accumulatedReasoning || undefined,
         usage: latestUsage,
         isStreamed: isStreaming,

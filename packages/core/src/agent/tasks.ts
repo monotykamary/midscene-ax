@@ -726,7 +726,17 @@ export class TaskExecutor {
               const preparedUserPrompt = await getPreparedUserPrompt();
 
               setTimingFieldOnce(timing, 'callAiStart');
+              // The device may describe the page it shows this round.
+              const pageDescription =
+                typeof this.interface.planningContext === 'function'
+                  ? await Promise.resolve(this.interface.planningContext())
+                      .then((text) =>
+                        typeof text === 'string' && text ? text : undefined,
+                      )
+                      .catch(() => undefined)
+                  : undefined;
               planResult = await planImpl(preparedUserPrompt, {
+                ...(pageDescription ? { pageDescription } : {}),
                 context: planningUiContext,
                 actionContext: renderAIContext(aiActContext),
                 actionSpace,
@@ -1108,6 +1118,10 @@ export class TaskExecutor {
         if (ifTypeRestricted) {
           // If AI returned a plain string instead of structured format, use it directly
           if (typeof data === 'string') {
+            outputResult = data;
+          } else if (typeof data === 'boolean' || typeof data === 'number') {
+            // Some models answer a bare `true` instead of
+            // `{[keyOfResult]: true}`; the value itself is the result.
             outputResult = data;
           } else if (type === 'WaitFor') {
             if (data === null || data === undefined) {

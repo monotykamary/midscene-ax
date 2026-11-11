@@ -588,6 +588,15 @@ describe('Action Parameter Validation', () => {
       const parsed = parseActionParam(rawParam, actionInputParamSchema);
       expect(parsed!.value).toBe('42');
     });
+
+    it('should accept clear mode without a value', () => {
+      const parsed = parseActionParam(
+        { mode: 'clear', locate: { prompt: 'the search box' } },
+        actionInputParamSchema,
+      );
+      expect(parsed!.mode).toBe('clear');
+      expect(parsed!.value).toBeUndefined();
+    });
   });
 
   describe('defineActionInput', () => {
@@ -661,6 +670,44 @@ describe('Action Parameter Validation', () => {
       expect(clearInputMock).toHaveBeenCalledWith(undefined);
       expect(typeTextMock).not.toHaveBeenCalled();
     });
+
+    it('should clear without a value in clear mode', async () => {
+      const typeTextMock = rs.fn();
+      const clearInputMock = rs.fn().mockResolvedValue(undefined);
+
+      const action = defineActionInput({
+        typeText: typeTextMock,
+        clearInput: clearInputMock,
+        keyboardPress: rs.fn(),
+        cursorMove: rs.fn(),
+      });
+
+      await action.call({ mode: 'clear' });
+
+      expect(clearInputMock).toHaveBeenCalledWith(undefined);
+      expect(typeTextMock).not.toHaveBeenCalled();
+    });
+
+    it.each(['replace', 'typeOnly'] as const)(
+      'should refuse to run %s mode without a value',
+      async (mode) => {
+        const typeTextMock = rs.fn();
+        const clearInputMock = rs.fn();
+
+        const action = defineActionInput({
+          typeText: typeTextMock,
+          clearInput: clearInputMock,
+          keyboardPress: rs.fn(),
+          cursorMove: rs.fn(),
+        });
+
+        await expect(action.call({ mode })).rejects.toThrow(
+          'Input needs a value',
+        );
+        expect(typeTextMock).not.toHaveBeenCalled();
+        expect(clearInputMock).not.toHaveBeenCalled();
+      },
+    );
 
     it('should convert append mode to typeOnly', async () => {
       const typeTextMock = rs.fn().mockResolvedValue(undefined);

@@ -572,6 +572,54 @@ describe('TaskExecutor - Null Data Handling', () => {
       expect(result.output).toBe('true');
     });
 
+    it.each([
+      ['Assert', true],
+      ['Assert', false],
+      ['WaitFor', true],
+    ] as const)(
+      'takes a bare %s answer of %s as the result, not an object',
+      async (type, answer) => {
+        const mockInsight = {
+          contextRetrieverFn: rs.fn(async () => await createMockUIContext()),
+          extract: rs.fn(async () => ({
+            data: answer,
+            usage: { totalTokens: 100 },
+            thought: 'The popup lists the product',
+            dump: createMockDump(answer, 'The popup lists the product', {
+              totalTokens: 100,
+            }),
+          })),
+          onceDumpUpdatedFn: undefined,
+        } as any;
+
+        const mockModelConfig: IModelConfig = {
+          modelName: 'mock-model',
+          modelDescription: 'mock-model-description',
+          intent: 'default',
+          slot: 'default',
+        };
+
+        const taskExecutor = new TaskExecutor({} as any, mockInsight, {
+          getDefaultModelRuntime: () => getModelRuntime(mockModelConfig),
+          actionSpace: [],
+        });
+
+        const queryTask = await (taskExecutor as any).createTypeQueryTask(
+          type,
+          'The popup lists the product',
+          getModelRuntime(mockModelConfig),
+          {},
+        );
+
+        const result = await queryTask.executor({
+          task: queryTask,
+          uiContext: await createEmptyUIContext(),
+        } as any);
+
+        expect(result.output).toBe(answer);
+      },
+    );
+
     it('should handle null data for Query operation', async () => {
       const mockInsight = {
         contextRetrieverFn: rs.fn(async () => await createMockUIContext()),

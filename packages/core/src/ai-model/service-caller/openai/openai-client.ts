@@ -14,6 +14,24 @@ import {
   wrapOpenAICompatibleFetch,
 } from './openai-request-context';
 
+const localNoAuthHostnames = ['localhost', '127.0.0.1', '[::1]'];
+
+/**
+ * Whether the base URL is a plain-HTTP loopback endpoint, such as a local
+ * OpenAI-compatible server that does not authenticate.
+ */
+function isLocalNoAuthEndpoint(baseURL: string | undefined): boolean {
+  if (!baseURL) return false;
+  try {
+    const url = new URL(baseURL);
+    return (
+      url.protocol === 'http:' && localNoAuthHostnames.includes(url.hostname)
+    );
+  } catch {
+    return false;
+  }
+}
+
 const createAndWrapClient = async ({
   openaiBaseURL,
   openaiApiKey,
@@ -37,7 +55,10 @@ const createAndWrapClient = async ({
 
   const openAIOptions = {
     baseURL: openaiBaseURL,
-    apiKey: openaiApiKey,
+    // The OpenAI SDK requires an API key even when a local compatible endpoint
+    // does not authenticate. An empty string satisfies the SDK.
+    apiKey:
+      openaiApiKey ?? (isLocalNoAuthEndpoint(openaiBaseURL) ? '' : undefined),
     // Use fetchOptions.dispatcher for fetch-based SDK instead of httpAgent
     // Note: Type assertion needed due to undici version mismatch between dependencies
     ...(proxyAgent ? { fetchOptions: { dispatcher: proxyAgent as any } } : {}),
