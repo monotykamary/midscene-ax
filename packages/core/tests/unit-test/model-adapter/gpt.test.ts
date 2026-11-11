@@ -257,8 +257,8 @@ describe('gpt model adapter', () => {
       }
       const codec = adapter.locate.element.resultCodec;
       // Padding is appended right/bottom, so pixel bboxes map one to one.
-      // gpt-5 boxes are edge bounds; gpt-6 keeps inclusive pixel endpoints.
-      const side = family === 'gpt-5' ? 200 : 201;
+      // Both GPT adapters use half-open image-edge bounds.
+      const side = 200;
       expect(codec.toPixelResult([100, 200, 300, 400], prepared)).toEqual({
         center: [200, 300],
         rect: { left: 100, top: 200, width: side, height: side },
@@ -394,24 +394,47 @@ it.each(['low', 'auto', 'high'] as const)(
   },
 );
 
-describe('gpt pixel box edges', () => {
-  const context = { preparedSize: { width: 100, height: 80 } };
-  it('gpt-5 accepts a box ending on the image edge', () => {
-    const locate = gpt5Adapter.locate;
-    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
-    expect(
-      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], context),
-    ).toEqual({
-      center: [80, 60],
-      rect: { left: 60, top: 40, width: 40, height: 40 },
-    });
-  });
+describe.each(['gpt-5', 'gpt-6'] as const)('%s bbox boundaries', (family) => {
+  const adapter = new ResolvedModelAdapter(gptAdapters[family], family);
 
-  it('gpt-6 keeps inclusive bounds', () => {
-    const locate = gpt6Adapter.locate;
-    if (locate.kind !== 'standard') throw new Error('Expected standard locate');
-    expect(() =>
-      locate.element.resultCodec.toPixelResult([60, 40, 100, 80], context),
-    ).toThrow(/exceed/);
+  it('accepts image-edge endpoints for element and search-area results', () => {
+    if (adapter.locate.kind !== 'standard' || !adapter.locate.searchArea) {
+      throw new Error('Expected standard element and search-area locate');
+    }
+    for (const { resultCodec } of [
+      adapter.locate.element,
+      adapter.locate.searchArea,
+    ]) {
+      expect(
+        resultCodec.toPixelResult([1600, 1600, 2000, 2000], {
+          preparedSize: { width: 2000, height: 2000 },
+        }),
+      ).toEqual({
+        center: [1800, 1800],
+        rect: { left: 1600, top: 1600, width: 400, height: 400 },
+      });
+      // Variants returning the last pixel index remain accepted.
+      expect(
+        resultCodec.toPixelResult([1600, 1600, 1999, 1999], {
+          preparedSize: { width: 2000, height: 2000 },
+        }),
+      ).toEqual({
+        center: [1800, 1800],
+        rect: { left: 1600, top: 1600, width: 399, height: 399 },
+      });
+      expect(
+        resultCodec.toPixelResult([430, 240, 850, 720], {
+          preparedSize: { width: 1280, height: 720 },
+        }),
+      ).toEqual({
+        center: [640, 480],
+        rect: { left: 430, top: 240, width: 420, height: 480 },
+      });
+      expect(() =>
+        resultCodec.toPixelResult([1600, 1600, 2001, 2000], {
+          preparedSize: { width: 2000, height: 2000 },
+        }),
+      ).toThrow(/exceed/);
+    }
   });
 });

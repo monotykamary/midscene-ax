@@ -6,6 +6,7 @@ import type {
   ModelAdapterDefinition,
   ModelRuntime,
 } from '../model-adapter/types';
+import { antLingAdapters } from './ant-ling/adapter';
 import { autoGlmAdapters } from './auto-glm/adapter';
 import { deepSeekAdapters } from './deepseek/adapter';
 import { defaultOpenAICompatibleAdapterConfig } from './default';
@@ -17,9 +18,11 @@ import { jevAdapters } from './jev/adapter';
 import { kimiAdapters } from './kimi';
 import { mimoAdapters } from './mimo';
 import { qwenAdapters } from './qwen';
+import { tencentHyAdapters } from './tencent-hy';
 import { uiTarsAdapters } from './ui-tars/adapter';
 
 export const MODEL_ADAPTER_CONFIGS = {
+  ...antLingAdapters,
   ...jevAdapters,
   ...qwenAdapters,
   ...deepSeekAdapters,
@@ -29,6 +32,7 @@ export const MODEL_ADAPTER_CONFIGS = {
   ...glmAdapters,
   ...autoGlmAdapters,
   ...gptAdapters,
+  ...tencentHyAdapters,
   ...kimiAdapters,
   ...mimoAdapters,
 } satisfies Record<TModelFamily, ModelAdapterDefinition>;

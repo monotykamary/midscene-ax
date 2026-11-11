@@ -5,7 +5,7 @@ import type {
   IOSDeviceOpt,
 } from './device';
 import type { WorkflowExecutionRecord } from './test-runner/execution-record';
-import type { AgentOpt, LocateResultElement, Rect } from './types';
+import type { AgentOpt, LocateResultElement, Rect, TreeQuery } from './types';
 import type { UIContext } from './types';
 
 export interface LocateOption extends Partial<TMultimodalPrompt> {
@@ -21,6 +21,13 @@ export interface LocateOption extends Partial<TMultimodalPrompt> {
   deepThink?: boolean; // alias for deepLocate
   cacheable?: boolean; // user can set this param to false to disable the cache for a single agent api
   xpath?: string; // only available in web
+  /**
+   * Accessibility-tree address (a ref, or role and name). Used only by
+   * interfaces that implement `locateInTree`; it resolves without a model when
+   * exactly one perceivable element matches, otherwise the prompt is located
+   * as usual.
+   */
+  tree?: TreeQuery;
   uiContext?: UIContext;
   fileChooserAccept?: string | string[]; // file path(s) to upload when tapping triggers a file chooser
 }

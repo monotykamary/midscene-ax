@@ -310,6 +310,25 @@ describe(
       }).rejects.toThrowError();
     });
 
+    it("records the planning loop's end after an action failed", async () => {
+      const runner = new TaskRunner('loop-end', fakeUIContextBuilder, {
+        tasks: [insightFindTask(true)],
+      });
+
+      await expect(runner.flush()).rejects.toThrowError();
+      expect(runner.status).toBe('error');
+
+      // The end is recorded as a failed error task with its own message, not
+      // hidden behind 'cannot append task'.
+      await expect(
+        runner.appendErrorPlan('too many errors in one planning loop'),
+      ).rejects.toThrow('too many errors in one planning loop');
+      const last = runner.tasks[runner.tasks.length - 1];
+      expect(last.subType).toBe('Error');
+      expect(last.status).toBe('failed');
+      expect(last.thought).toBe('too many errors in one planning loop');
+    });
+
     it('allows append and flush when recovering from error', async () => {
       const runner = new TaskRunner('recoverable', fakeUIContextBuilder, {
         tasks: [insightFindTask(true)],

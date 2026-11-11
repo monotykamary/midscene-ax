@@ -68,4 +68,12 @@ export type LocateResultElement = {
    * It is the ratio between physical screenshot pixels and logical CSS pixels.
    */
   dpr?: number;
+  /**
+   * Opaque accessibility-tree handle, set only when the element was located
+   * from the device's tree. Actions on an interface that implements
+   * `actOnRef` address the element by this handle instead of by `center`.
+   */
+  nodeRef?: string;
+  /** Tree revision `nodeRef` belongs to, when the interface reports one. */
+  treeRevision?: string;
 };

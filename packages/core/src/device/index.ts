@@ -11,9 +11,14 @@ import { getDebug } from '@midscene/shared/logger';
 import { _keyDefinitions } from '@midscene/shared/us-keyboard-layout';
 import { z } from 'zod';
 import type {
+  ActReceipt,
   ElementCacheFeature,
+  Perceivability,
   Rect,
+  RefOperation,
   Size,
+  TreeMatch,
+  TreeQuery,
   UIContext,
   UITreeSnapshot,
 } from '../types';
@@ -100,6 +105,7 @@ export interface PointerInputPrimitives {
   tap(p: PointerPoint, opts?: { duration?: number }): Promise<void>;
   doubleClick?(p: PointerPoint): Promise<void>;
   rightClick?(p: PointerPoint): Promise<void>;
+  middleClick?(p: PointerPoint): Promise<void>;
   hover?(p: PointerPoint): Promise<void>;
   longPress?(p: PointerPoint, opts?: { duration?: number }): Promise<void>;
   dragAndDrop?(from: PointerPoint, to: PointerPoint): Promise<void>;
@@ -226,6 +232,49 @@ export abstract class AbstractInterface {
 
   abstract getUITree?(): Promise<UITreeSnapshot>;
 
+  /**
+   * Harness contract (optional). Find elements in the accessibility tree.
+   * Return every match; core acts only when there is exactly one perceivable
+   * match and otherwise falls back to AI locate. Never widen the query on the
+   * interface side (no fuzzy names when `exact` is set).
+   */
+  locateInTree?(query: TreeQuery, signal?: AbortSignal): Promise<TreeMatch[]>;
+
+  /**
+   * Harness contract (optional). Perform one operation on a matched element
+   * by its ref and report what happened. Revalidate the ref before acting and
+   * return `stale` or `blocked` rather than acting on something else. Act at
+   * most once; never retry by coordinates inside this method.
+   */
+  actOnRef?(
+    match: TreeMatch,
+    operation: RefOperation,
+    payload?: string,
+    signal?: AbortSignal,
+  ): Promise<ActReceipt>;
+
+  /**
+   * Harness contract (optional). Whether `actOnRef` can perform this
+   * operation on this element at all (for example, the interface may only
+   * click, type and press some keys by ref). Return false to have Midscene act
+   * at the located coordinates instead; nothing must be sent to the element.
+   * A refusal that depends on the element's state (disabled, covered) is not
+   * a reason to return false: let `actOnRef` return `blocked`.
+   */
+  supportsRefOperation?(
+    match: TreeMatch,
+    operation: RefOperation,
+    payload?: string,
+    signal?: AbortSignal,
+  ): Promise<boolean>;
+
+  /**
+   * Harness contract (optional). Whether a user could perceive the element
+   * (on screen, not covered, not transparent). Used when a `TreeMatch` does
+   * not already carry `perceivable`.
+   */
+  perceivable?(match: TreeMatch, signal?: AbortSignal): Promise<Perceivability>;
+
   abstract destroy?(): Promise<void>;
 
   abstract describe?(): string;
@@ -267,6 +316,14 @@ export abstract class AbstractInterface {
    * the target device's timezone when formatted on the host machine.
    */
   getDeviceLocalTimeString?(format?: string): Promise<string>;
+
+  /**
+   * A description of the page the device shows now (for example the native
+   * state behind the screenshot), given to aiAct's planner with this round's
+   * request only; it is not kept in the conversation history. A failure is
+   * ignored.
+   */
+  planningContext?(): string | undefined | Promise<string | undefined>;
 
   /** URL of native MJPEG stream for real-time screen preview (e.g. WDA MJPEG server) */
   mjpegStreamUrl?: string;
@@ -478,6 +535,37 @@ export const defineActionRightClick = (
     missingLocateMessage: 'Element not found, cannot right click',
     call: async (point) => {
       await rightClick(point);
+    },
+  });
+};
+
+// MiddleClick
+export const actionMiddleClickParamSchema = z.object({
+  locate: getMidsceneLocationSchema().describe(
+    'The element to be middle clicked',
+  ),
+});
+export type ActionMiddleClickParam = {
+  locate: LocateResultElement;
+};
+
+export const defineActionMiddleClick = (
+  middleClick: NonNullable<PointerInputPrimitives['middleClick']>,
+): DeviceAction<ActionMiddleClickParam> => {
+  return defineLocatedPointAction<
+    typeof actionMiddleClickParamSchema,
+    ActionMiddleClickParam
+  >({
+    name: 'MiddleClick',
+    description: 'Middle click the element',
+    interfaceAlias: 'aiMiddleClick',
+    paramSchema: actionMiddleClickParamSchema,
+    sample: {
+      locate: { prompt: 'the link to open in a new tab' },
+    },
+    missingLocateMessage: 'Element not found, cannot middle click',
+    call: async (point) => {
+      await middleClick(point);
     },
   });
 };
@@ -701,7 +789,7 @@ export const actionScrollParamSchema = z.object({
     .enum(['down', 'up', 'right', 'left'])
     .default('down')
     .describe(
-      'The direction toward the off-screen content to reveal. "down" reveals content below the current viewport, "up" reveals content above, "right" reveals content to the right, and "left" reveals content to the left. This does not describe the movement direction of the content currently visible on the screen. Only effective when scrollType is "singleAction".',
+      'The direction toward the off-screen content to reveal. Quick mapping: want to see content below the current viewport -> "down"; above -> "up"; to the left -> "left"; to the right -> "right". This does not describe the movement direction of the content currently visible on the screen. Only effective when scrollType is "singleAction".',
     ),
   distance: z
     .number()
@@ -831,7 +919,7 @@ function createActionSwipeParamSchema(inputMode: SwipeInputMode) {
       .enum(['up', 'down', 'left', 'right'])
       .optional()
       .describe(
-        `${movementSource === 'finger' ? 'Finger' : 'Pointer'} movement direction. Required together with a positive distance for a relative swipe. Omit when using end.`,
+        `${movementSource === 'finger' ? 'Finger' : 'Pointer'} movement direction. Quick mapping: move the ${movementSource} or content upward -> "up"; downward -> "down"; leftward -> "left"; rightward -> "right". Required together with a positive distance for a relative swipe. Omit when using end.`,
       ),
     distance: z
       .number()
@@ -1234,6 +1322,9 @@ export function defineActionsFromInputPrimitives(
     }
     if (pointer.rightClick) {
       actions.push(defineActionRightClick(pointer.rightClick));
+    }
+    if (pointer.middleClick) {
+      actions.push(defineActionMiddleClick(pointer.middleClick));
     }
     if (pointer.hover) {
       actions.push(defineActionHover(pointer.hover));

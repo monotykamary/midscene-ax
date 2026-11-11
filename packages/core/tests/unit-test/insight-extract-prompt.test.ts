@@ -199,6 +199,95 @@ describe('insight extraction prompt assembly', () => {
     });
   });
 
+  it('extracts from text alone when the context has no screenshot', async () => {
+    const { screenshot: _screenshot, ...context } = createFakeContext() as any;
+
+    const result = await AiExtractElementInfo<{ result: boolean }>({
+      taskType: 'extract',
+      context,
+      dataQuery: { StatementIsTruthy: 'The page says hello' },
+      extractOption: { screenshotIncluded: false },
+      modelRuntime: getModelRuntime(modelConfig),
+    });
+
+    expect(result.parseResult.data).toEqual({ result: true });
+    const msgs = rs.mocked(callGenerativeAI).mock.calls[0]?.[0];
+    const images = (msgs ?? []).flatMap((m: any) =>
+      Array.isArray(m.content)
+        ? m.content.filter((c: any) => c.type === 'image')
+        : [],
+    );
+    expect(images).toHaveLength(0);
+  });
+
+  it('presents images with role current as current-state evidence, and keeps reference wording for the rest', async () => {
+    await AiExtractElementInfo<{ result: boolean }>({
+      taskType: 'extract',
+      context: createFakeContext(),
+      dataQuery: { StatementIsTruthy: 'The list shows ten rows' },
+      multimodalPrompt: {
+        images: [
+          {
+            name: 'below-the-fold',
+            url: 'data:image/png;base64,A',
+            role: 'current',
+          },
+          { name: 'design', url: 'data:image/png;base64,B' },
+        ],
+      },
+      modelRuntime: getModelRuntime(modelConfig),
+    });
+
+    const msgs = rs.mocked(callGenerativeAI).mock.calls[0]?.[0] as any[];
+    const system = msgs[0].content as string;
+    expect(system).toContain(
+      'additional evidence images captured sequentially',
+    );
+    expect(system).toContain('Reference images are supporting context only');
+    const texts = msgs
+      .slice(1)
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .filter((c) => c.type === 'text')
+      .map((c) => c.text as string);
+    expect(
+      texts.some((t) =>
+        t.startsWith('This is the latest viewport screenshot.'),
+      ),
+    ).toBe(true);
+    expect(texts).toContain(
+      "This is fresh current-state evidence named 'below-the-fold', captured from the current observation. It may show a different region than other current-state images; evaluate all current-state evidence collectively:",
+    );
+    expect(texts).toContain(
+      "this is the reference image named 'design'. It is a reference image, not the current screenshot:",
+    );
+  });
+
+  it('adds no reference preamble when every image is current-state evidence', async () => {
+    await AiExtractElementInfo<{ result: boolean }>({
+      taskType: 'extract',
+      context: createFakeContext(),
+      dataQuery: { StatementIsTruthy: 'The footer is shown' },
+      multimodalPrompt: {
+        images: [
+          { name: 'footer', url: 'data:image/png;base64,A', role: 'current' },
+        ],
+      },
+      modelRuntime: getModelRuntime(modelConfig),
+    });
+    const msgs = rs.mocked(callGenerativeAI).mock.calls[0]?.[0] as any[];
+    expect(msgs[0].content).not.toContain(
+      'Reference images are supporting context only',
+    );
+    const texts = msgs
+      .flatMap((m) => (Array.isArray(m.content) ? m.content : []))
+      .map((c: any) => c.text ?? '');
+    expect(
+      texts.some((t: string) =>
+        t.includes('Next, I will provide all the reference images'),
+      ),
+    ).toBe(false);
+  });
+
   it('passes abortSignal to the AI caller', async () => {
     const abortController = new AbortController();
 
