@@ -544,6 +544,53 @@ describe('harness contract: acting on refs', () => {
     param: { locate: { prompt: 'Log in' } },
   });
 
+  // A read-only demo box shares the login field's name.
+  const demoField: TreeMatch = {
+    ref: 'e3',
+    rect: { left: 10, top: 20, width: 40, height: 10 },
+    role: 'textbox',
+    name: 'Password',
+    revision: 'r1',
+    editable: false,
+  };
+  const loginField: TreeMatch = {
+    ...demoField,
+    ref: 'e7',
+    rect: { left: 10, top: 60, width: 40, height: 10 },
+    editable: true,
+  };
+
+  it('types into the only editable field among same-name matches', async () => {
+    const device = new HarnessInterface();
+    device.matches = [demoField, loginField];
+    const { run } = await runPlan(device, input(), {
+      type: 'Input',
+      thought: '',
+      param: { locate: { prompt: 'Password' }, value: 'secret' },
+    });
+    await run;
+    expect(device.actSpy).toHaveBeenCalledWith(
+      loginField,
+      'input',
+      'secret',
+      undefined,
+    );
+  });
+
+  it('still abstains on same-name fields for any action but Input', async () => {
+    const device = new HarnessInterface();
+    device.matches = [demoField, loginField];
+    const tapAction = tap();
+    const { run } = await runPlan(device, tapAction, {
+      type: 'Tap',
+      thought: '',
+      param: { locate: { prompt: 'Password' } },
+    });
+    await run;
+    expect(device.actSpy).not.toHaveBeenCalled();
+    expect(tapAction.call).toHaveBeenCalledTimes(1);
+  });
+
   it('acts on the ref when the receipt is executed', async () => {
     const device = new HarnessInterface();
     device.receipt = {
@@ -585,6 +632,48 @@ describe('harness contract: acting on refs', () => {
       operation: 'tap',
       fallback: 'coordinates',
     });
+  });
+
+  it('acts at coordinates without calling actOnRef when the interface declines the operation', async () => {
+    const device = new HarnessInterface() as HarnessInterface & {
+      supportsRefOperation: AbstractInterface['supportsRefOperation'];
+    };
+    const supportsSpy = rs.fn(async () => false);
+    device.supportsRefOperation = supportsSpy;
+    const tapAction = tap();
+    const { run, task } = await runPlan(device, tapAction, tapPlan());
+    await run;
+
+    expect(supportsSpy).toHaveBeenCalledWith(
+      loginMatch,
+      'tap',
+      undefined,
+      undefined,
+    );
+    expect(device.actSpy).not.toHaveBeenCalled();
+    expect(tapAction.call).toHaveBeenCalledTimes(1);
+    expect(tapAction.call.mock.calls[0][0].locate.center).toEqual([30, 25]);
+    expect(task.receipt).toBeUndefined();
+    expect(task.refAct).toEqual({
+      ref: 'e12',
+      operation: 'tap',
+      fallback: 'coordinates',
+      declined: true,
+    });
+  });
+
+  it('acts on the ref when the interface supports the operation', async () => {
+    const device = new HarnessInterface() as HarnessInterface & {
+      supportsRefOperation: AbstractInterface['supportsRefOperation'];
+    };
+    device.supportsRefOperation = rs.fn(async () => true);
+    const tapAction = tap();
+    const { run, task } = await runPlan(device, tapAction, tapPlan());
+    await run;
+
+    expect(device.actSpy).toHaveBeenCalledTimes(1);
+    expect(tapAction.call).not.toHaveBeenCalled();
+    expect(task.refAct).toEqual({ ref: 'e12', operation: 'tap' });
   });
 
   it('throws with the reason when the action is blocked', async () => {

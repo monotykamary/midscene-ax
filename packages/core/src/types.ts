@@ -225,6 +225,8 @@ export interface TreeMatch {
   revision?: string;
   /** Present when the interface checked perceivability while matching. */
   perceivable?: Perceivability;
+  /** For a field: whether a user can type into it now (not read-only or disabled). */
+  editable?: boolean;
 }
 
 /**
@@ -246,6 +248,11 @@ export interface ActReceipt {
   diff?: string;
   /** Tree revision after the operation. */
   revision?: string;
+  /**
+   * Set when the interface found the original ref stale and acted on the one
+   * element with the same identity in a fresh tree instead.
+   */
+  rebound?: { from: string; to: string };
 }
 
 export type RefOperation =
@@ -264,6 +271,8 @@ export interface TreeLocateRecord {
   query: TreeQuery;
   outcome: 'hit' | 'abstained';
   reason?: string;
+  /** Why a hit was chosen among several matches, e.g. the only editable one. */
+  note?: string;
   matchCount?: number;
   ref?: string;
   revision?: string;
@@ -273,8 +282,13 @@ export interface TreeLocateRecord {
 export interface RefActRecord {
   ref: string;
   operation: RefOperation;
-  /** Set when a `stale` receipt sent the action down the coordinate path. */
+  /**
+   * Set when the action went down the coordinate path: after a `stale`
+   * receipt, or when the interface declined the operation (`declined`).
+   */
   fallback?: 'coordinates';
+  /** `supportsRefOperation` returned false, so `actOnRef` was not called. */
+  declined?: boolean;
 }
 
 export abstract class UIContext {

@@ -24,6 +24,7 @@ import {
   treeQueryLaws,
   treeQueryLooseRule,
   treeQueryRule,
+  treeRungAnyActionEditableRule,
   treeRungBlindRule,
   treeRungFirstMatchRule,
   treeRungIgnoreErrorRule,
@@ -56,7 +57,8 @@ function refutes(laws: Laws, broken: readonly string[]) {
   }
 }
 
-const EXACTLY_ONE = 'the tree rung hits only on exactly one match';
+const EXACTLY_ONE =
+  'the tree rung hits only on exactly one match, or for an input on the only editable one of several';
 const RECHECK =
   'an exact query counts only whole-name equal matches: core re-checks the name';
 
@@ -66,12 +68,21 @@ describe('harness contract laws', () => {
     [
       'takes the first of several matches',
       treeRungFirstMatchRule,
-      [EXACTLY_ONE],
+      [
+        EXACTLY_ONE,
+        'only an input takes the editable one of several matches',
+        'several editable matches abstain even for an input',
+      ],
     ],
     [
       'trusts the interface for an exact name',
       treeRungNoRecheckRule,
       [EXACTLY_ONE, RECHECK],
+    ],
+    [
+      'takes the editable one of several for any action',
+      treeRungAnyActionEditableRule,
+      [EXACTLY_ONE, 'only an input takes the editable one of several matches'],
     ],
     [
       'ignores a hidden verdict',
