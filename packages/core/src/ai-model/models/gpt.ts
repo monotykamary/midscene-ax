@@ -178,8 +178,13 @@ export const gptAdapters = {
     locate: {
       element: {
         resultFormat: {
-          // Pixel boxes may end on the image's right or bottom edge.
-          coordinates: { shape: 'bbox', boundsType: 'edges', order: 'xy' },
+          // GPT can return image width/height as bbox endpoints (issue #3351).
+          // Accept image-edge coordinates without assuming all variants do so.
+          coordinates: {
+            shape: 'bbox',
+            order: 'xy',
+            boundsType: 'left-closed-right-open',
+          },
         },
       },
     },
@@ -201,7 +206,13 @@ export const gptAdapters = {
     locate: {
       element: {
         resultFormat: {
-          coordinates: { shape: 'bbox', order: 'xy' },
+          // GPT can return image width/height as bbox endpoints (issue #3351).
+          // Accept image-edge coordinates without assuming all variants do so.
+          coordinates: {
+            shape: 'bbox',
+            order: 'xy',
+            boundsType: 'left-closed-right-open',
+          },
         },
       },
     },

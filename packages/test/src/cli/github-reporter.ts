@@ -1,5 +1,6 @@
 import { appendFileSync } from 'node:fs';
 import { relative, resolve, sep } from 'node:path';
+import { renderTestBadgeLines } from '../report/badge';
 import { formatDuration } from './terminal-reporter';
 import type { TestProjectRunResult } from './types';
 
@@ -20,6 +21,19 @@ const markdown = (text: string) =>
         '\n': ' ',
       })[char]!,
   );
+
+// Entity references are not decoded inside code spans, so paths are kept
+// as is, fenced with more backticks than the longest run they contain.
+const code = (text: string) => {
+  const value = text.replace(/[\r\n]+/g, ' ');
+  const longest = Math.max(
+    0,
+    ...(value.match(/`+/g) ?? []).map((run) => run.length),
+  );
+  const fence = '`'.repeat(longest + 1);
+  const pad = value.startsWith('`') || value.endsWith('`') ? ' ' : '';
+  return `${fence}${pad}${value}${pad}${fence}`;
+};
 
 /** Annotations use real source files. Step positions remain in the title when no source line is available. */
 export function githubFailureAnnotation(
@@ -44,6 +58,7 @@ export function writeGitHubSummary(result: TestProjectRunResult): void {
   const summary = [
     '## Midscene Test',
     '',
+    ...renderTestBadgeLines(result),
     '| Passed | Failed | Not run | Passed after retry | Duration |',
     '| ---: | ---: | ---: | ---: | ---: |',
     `| ${result.summary.passed} | ${result.summary.failed} | ${result.summary.notRun} | ${result.summary.passedAfterRetry} | ${formatDuration(result.durationMs)} |`,
@@ -52,7 +67,7 @@ export function writeGitHubSummary(result: TestProjectRunResult): void {
     '',
     ...failedCases.map(
       (item) =>
-        `- Failed: **${markdown(item.name)}** — ${markdown(item.projectName)}/\`${markdown(item.sourcePath)}\``,
+        `- Failed: **${markdown(item.name)}** — ${markdown(item.projectName)}/${code(item.sourcePath)}`,
     ),
     ...(result.summary.collectionErrors
       ? [`- Collection errors: ${result.summary.collectionErrors}`]
@@ -65,9 +80,9 @@ export function writeGitHubSummary(result: TestProjectRunResult): void {
       : []),
     '',
     ...(result.reportPath
-      ? [`Report artifact entry: \`${markdown(result.reportPath)}\``]
+      ? [`Report artifact entry: ${code(result.reportPath)}`]
       : []),
-    `Structured results: \`${markdown(result.summaryPath)}\``,
+    `Structured results: ${code(result.summaryPath)}`,
     '',
   ].join('\n');
   appendFileSync(output, `${summary}\n`);

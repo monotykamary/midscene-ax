@@ -35,8 +35,10 @@
       "**/dump-with-invisible.json",
       "**/dump-for-utils-test.json",
       "**/.rslib",
+      "**/.wrangler/**",
       "**/.native-build/**",
-      "apps/chrome-extension/web-ext-profile/**"
+      "apps/chrome-extension/web-ext-profile/**",
+      "packages/web-integration/src/browser-harness/vendor/**"
     ]
   },
   "javascript": {

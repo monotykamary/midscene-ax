@@ -1,7 +1,7 @@
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { afterEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, describe, expect, it, rs } from '@rstest/core';
 import { loadTestProject } from '../src/cli/test-project';
 import { NodeRegistry } from '../src/engine/registry';
 
@@ -323,7 +323,7 @@ describe('test project config', () => {
   });
 
   it('attaches root setup to the implicit Project without executing it', async () => {
-    const marker = vi.fn();
+    const marker = rs.fn();
     (globalThis as Record<string, unknown>).__testSetupMarker = marker;
     const { path } = createConfig(`
       export default {
@@ -512,7 +512,7 @@ describe('test project config', () => {
   );
 
   it('resolves Project selectors, setup binding, test options, and output', async () => {
-    const setupMarker = vi.fn();
+    const setupMarker = rs.fn();
     (globalThis as Record<string, unknown>).__testSetupMarker = setupMarker;
     const { path } = createConfig(`
       const androidSetup = {
@@ -591,10 +591,21 @@ describe('test project config', () => {
     });
     expect(loaded.output).toEqual({
       reportDir: './out/report',
+      reportFormat: 'single-html',
     });
   });
 
   it.each([
+    [
+      'invalid report format',
+      "output: { reportFormat: 'png' }",
+      'output.reportFormat must be',
+    ],
+    [
+      'unsupported artifact root option',
+      "output: { runDir: 'artifacts' }",
+      'output.runDir is not supported',
+    ],
     ['empty projects', 'projects: []', 'projects must be a non-empty array'],
     [
       'duplicate project names',
@@ -750,7 +761,7 @@ describe('test project config', () => {
     expect(error.message).toContain(`Failed to load Midscene config "${path}"`);
     expect(error.cause).toBeInstanceOf(Error);
     expect(error.cause.message).toMatch(
-      /Expected a semicolon|Unexpected token/,
+      /Expected a semicolon|Unexpected token|Missing initializer in const declaration|'const' declarations must be initialized/,
     );
   });
 
@@ -790,7 +801,7 @@ describe('test project config', () => {
   });
 
   it('does not execute a config twice when it throws a runtime SyntaxError', async () => {
-    const marker = vi.fn();
+    const marker = rs.fn();
     (globalThis as Record<string, unknown>).__testSetupMarker = marker;
     const { path } = createConfig(`
       globalThis.__testSetupMarker();
@@ -802,7 +813,7 @@ describe('test project config', () => {
   });
 
   it('falls back once when an imported module has an unknown extension', async () => {
-    const marker = vi.fn();
+    const marker = rs.fn();
     (globalThis as Record<string, unknown>).__testSetupMarker = marker;
     const { directory, path } = createConfig(`
       import './plugin.unsupported';
@@ -816,7 +827,7 @@ describe('test project config', () => {
   });
 
   it('does not retry runtime errors that only reuse a loader error code', async () => {
-    const marker = vi.fn();
+    const marker = rs.fn();
     (globalThis as Record<string, unknown>).__testSetupMarker = marker;
     const { path } = createConfig(`
       globalThis.__testSetupMarker();
