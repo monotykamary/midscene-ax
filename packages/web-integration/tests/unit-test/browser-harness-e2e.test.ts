@@ -766,6 +766,67 @@ describe('BrowserHarnessPage against a real browser', () => {
     }
   });
 
+  it('reads back an ordinary field whatever it is named, under masking', async () => {
+    const typed = 'fixture-plain-value';
+    await observer.evaluate(() => {
+      const input = document.createElement('input');
+      input.id = 'username';
+      input.name = 'firstName';
+      input.type = 'text';
+      input.placeholder = 'Postal code';
+      input.setAttribute('aria-label', 'Username');
+      input.style.cssText =
+        'position:fixed;left:600px;top:140px;width:120px;height:30px;z-index:1000';
+      document.body.appendChild(input);
+    });
+    const guard = new InteractionController(device.session, {
+      allowedOrigins: [baseUrl],
+      input: 'trusted',
+      allowSensitive: true,
+      maskSensitive: true,
+    });
+    try {
+      const dom = await device.page.cdp('DOM.getDocument', {});
+      const selected = await device.page.cdp('DOM.querySelector', {
+        nodeId: dom.root.nodeId,
+        selector: '#username',
+      });
+      const described = await device.page.cdp('DOM.describeNode', {
+        nodeId: selected.nodeId,
+      });
+      const observed = await guard.observe({
+        scope: device.page.scope,
+        backendNodeId: described.node.backendNodeId,
+      });
+      expect(observed.candidates).toHaveLength(1);
+      expect(observed.candidates[0].value).not.toBe('[masked]');
+      const targetId = observed.candidates[0].id;
+      const acted = await guard.act({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        action: { targetId, operation: 'type', text: typed },
+      });
+      expect(acted.status).toBe('executed');
+      const committed = await guard.commitTypedValue({
+        scope: device.page.scope,
+        observationId: observed.observationId,
+        targetId,
+      });
+      expect(committed.masked).not.toBe(true);
+      expect(
+        await observer.evaluate(
+          () =>
+            (document.querySelector('#username') as HTMLInputElement).value,
+        ),
+      ).toBe(typed);
+    } finally {
+      guard.close();
+      await observer.evaluate(() =>
+        document.querySelector('#username')?.remove(),
+      );
+    }
+  });
+
   it('takes a screenshot the size of the viewport', async () => {
     const shot = await device.screenshotBase64();
     expect(shot.startsWith('data:image/jpeg;base64,')).toBe(true);

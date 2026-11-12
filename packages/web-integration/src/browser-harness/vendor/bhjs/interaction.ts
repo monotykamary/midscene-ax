@@ -888,14 +888,15 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     return true;
   };
 
-  const sensitiveName = /pass(?:word|code|phrase)?|secret|token|api[\s_-]*key|auth|credential|security|user[\s_-]*name|login|full[\s_-]*name|first[\s_-]*name|last[\s_-]*name|surname|otp|one[\s_-]*time|mfa|2fa|\bpin\b|ssn|social[\s_-]*security|credit|card|cvv|cvc|iban|routing|account|bank|birth|\bdob\b|e[\s_-]*mail|phone|\btel\b|mobile|address|postal|zip/i;
   const sensitiveField = el => {
     if (el.type === 'password' || el.hasAttribute('data-private') || el.hasAttribute('data-sensitive')) return true;
     const autocomplete = el.getAttribute('autocomplete') || '';
     if (tooLong(autocomplete, LIMITS.text)) return true;
     const tokens = autocomplete.toLowerCase().split(/\s+/);
     if (tokens.some(token => token.includes('password') || token.startsWith('cc-') || token === 'one-time-code')) return true;
-    // Inspect every naming source, not only the winning accessible label. False positives are intentional.
+    // A field is sensitive by what the page declares (its type, autocomplete, a private mark), never by what it is
+    // called: a name list hides ordinary fields (a username, a first name, a postal code) and reads one language only.
+    // The naming sources are still bounded.
     const names = ['name', 'id', 'aria-label', 'title', 'placeholder'].map(key => el.getAttribute(key) || '');
     if (el.labels && el.labels.length > LIMITS.labels) {
       textTruncated = true;
@@ -904,7 +905,6 @@ const projectionSource = String.raw`async function(allowedOrigins, maxElements, 
     names.push(autocomplete, el.textContent || '', ...Array.from(el.labels || []).map(label => label.textContent || ''));
     for (const name of names) {
       if (tooLong(name, LIMITS.text)) return true;
-      if (sensitiveName.test(name.replace(/([a-z])([A-Z])/g, '$1 $2').replace(/[_-]/g, ' '))) return true;
     }
     return false;
   };
