@@ -815,8 +815,7 @@ describe('BrowserHarnessPage against a real browser', () => {
       expect(committed.masked).not.toBe(true);
       expect(
         await observer.evaluate(
-          () =>
-            (document.querySelector('#username') as HTMLInputElement).value,
+          () => (document.querySelector('#username') as HTMLInputElement).value,
         ),
       ).toBe(typed);
     } finally {
